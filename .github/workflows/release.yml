@@ -49,6 +49,9 @@ jobs:
           $clean                     | Add-Content $env:GITHUB_ENV
           "NOTES_EOF"                | Add-Content $env:GITHUB_ENV
 
+      - name: Cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
       - name: Build Layer (signed)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

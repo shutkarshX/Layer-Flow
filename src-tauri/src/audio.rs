@@ -396,9 +396,9 @@ mod imp {
                 loop {
                     if meter_opt.is_none() {
                         unsafe {
-                            let enumr: Result<IMMDeviceEnumerator, _> =
+                            let enumr_res: windows::core::Result<IMMDeviceEnumerator> =
                                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL);
-                            if let Ok(enumr) = enumr {
+                            if let Ok(enumr) = enumr_res {
                                 if let Ok(dev) = enumr.GetDefaultAudioEndpoint(eRender, eConsole) {
                                     if let Ok(m) = dev.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None) {
                                         meter_opt = Some(m);

@@ -1044,44 +1044,27 @@ fn apply(
     mgr: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager,
     cmd: Cmd,
 ) {
-    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status;
-    let list = mgr.GetSessions().ok();
-    let mut sessions: Vec<_> = list.as_ref().map(|l| l.into_iter().collect()).unwrap_or_default();
-    let playing_idx = sessions.iter().position(|s| {
-        s.GetPlaybackInfo()
-            .and_then(|i| i.PlaybackStatus())
-            .map(|st| st == Status::Playing)
-            .unwrap_or(false)
-    });
-    let session = match playing_idx {
-        Some(i) => sessions.swap_remove(i),
-        None => match mgr.GetCurrentSession() {
-            Ok(s) => s,
-            Err(_) if !sessions.is_empty() => sessions.swap_remove(0),
-            Err(_) => return,
-        },
+    let session = match mgr.GetCurrentSession() {
+        Ok(s) => s,
+        Err(_) => {
+            if let Ok(list) = mgr.GetSessions() {
+                if let Ok(s) = list.GetAt(0) {
+                    s
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
     };
-    match cmd {
-        Cmd::Next => {
-            if let Ok(op) = session.TrySkipNextAsync() {
-                let _ = await_op(op, 2000);
-            }
-        }
-        Cmd::Prev => {
-            if let Ok(op) = session.TrySkipPreviousAsync() {
-                let _ = await_op(op, 2000);
-            }
-        }
-        Cmd::Toggle => {
-            if let Ok(op) = session.TryTogglePlayPauseAsync() {
-                let _ = await_op(op, 2000);
-            }
-        }
+    let op = match cmd {
+        Cmd::Next => session.TrySkipNextAsync(),
+        Cmd::Prev => session.TrySkipPreviousAsync(),
+        Cmd::Toggle => session.TryTogglePlayPauseAsync(),
         Cmd::Seek(sec) => {
             let ticks = (sec.max(0.0) * 10_000_000.0) as i64;
-            if let Ok(op) = session.TryChangePlaybackPositionAsync(ticks) {
-                let _ = await_op(op, 2000);
-            }
+            session.TryChangePlaybackPositionAsync(ticks)
         }
         Cmd::Loop(repeat) => {
             let mode = if repeat {
@@ -1089,10 +1072,11 @@ fn apply(
             } else {
                 windows::Media::MediaPlaybackAutoRepeatMode::None
             };
-            if let Ok(op) = session.TryChangeAutoRepeatModeAsync(mode) {
-                let _ = await_op(op, 2000);
-            }
+            session.TryChangeAutoRepeatModeAsync(mode)
         }
+    };
+    if let Ok(op) = op {
+        let _ = await_op(op, 2000);
     }
 }
 

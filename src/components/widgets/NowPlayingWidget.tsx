@@ -3027,6 +3027,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
   const [isLooping, setIsLooping] = useState<boolean>(false)
   const lastLoopToggleTimeRef = useRef<number>(0)
   const lastLoopSeekTimeRef = useRef<number>(0)
+  const lastTrackKeyRef = useRef<string>('')
   const [discoveredThumb, setDiscoveredThumb] = useState<string | null>(null)
   const lastSeekTimeRef = useRef<number>(0)
   const liveAudioPeakRef = useRef<number>(0)
@@ -3200,17 +3201,29 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
         const [np, v] = await Promise.all([getNowPlaying(), getVolume()])
         if (!active) return
 
-        // Smooth debounce: during 1.8s after clicking play/pause,
-        // do not let delayed OS poll readings jitter or flicker the button!
-        const isRecentlyToggled = performance.now() - lastToggleTimeRef.current < 1800
-        if (isRecentlyToggled && sessionRef.current) {
-          np.playing = sessionRef.current.playing
-        }
+        // Track change detection: whenever track metadata changes, instantly reset scrubber
+        const currentKey = `${np?.title || ''}|${np?.artist || ''}`
+        const trackChanged =
+          currentKey !== '|' &&
+          lastTrackKeyRef.current !== '' &&
+          currentKey !== lastTrackKeyRef.current
+        lastTrackKeyRef.current = currentKey
 
-        setSession(np)
-        if (typeof v === 'number' && Number.isFinite(v)) setVol(v)
-        if (np?.hasSession) {
-          const isRecentlySeeked = performance.now() - lastSeekTimeRef.current < 2500
+        if (trackChanged) {
+          lastSeekTimeRef.current = 0
+          lastSyncRef.current = {
+            pos: np.position || 0,
+            time: performance.now(),
+            playing: np.playing,
+          }
+          setLivePos(np.position || 0)
+        } else if (np?.hasSession) {
+          const isRecentlyToggled = performance.now() - lastToggleTimeRef.current < 500
+          if (isRecentlyToggled && sessionRef.current) {
+            np.playing = sessionRef.current.playing
+          }
+
+          const isRecentlySeeked = performance.now() - lastSeekTimeRef.current < 2000
           const closeEnough = Math.abs((np.position || 0) - lastSyncRef.current.pos) < 1.0
           if (!isRecentlySeeked || closeEnough) {
             lastSyncRef.current = {
@@ -3220,18 +3233,23 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
             }
           }
 
-          // Safety check: if loop is active and polled OS position reached near end of duration:
+          // Autoloop for browser playback (Chrome/Edge):
+          const isBrowser = /chrome|edge|firefox|opera|brave|msedge/i.test(np.source || '')
           const npDur = np.duration || 0
           const npPos = np.position || 0
-          const loopThreshold = npDur > 6 ? npDur - 2.0 : Math.max(0.5, npDur - 0.8)
-          if (isLooping && npDur > 2 && npPos >= loopThreshold) {
+          const loopThreshold = npDur > 6 ? npDur - 2.8 : Math.max(0.5, npDur - 1.2)
+          if (isLooping && isBrowser && npDur > 2 && npPos >= loopThreshold) {
             const now = performance.now()
             if (now - lastLoopSeekTimeRef.current > 2500) {
               lastLoopSeekTimeRef.current = now
               handleSeek(0)
+              mediaControl('play').catch(() => {})
             }
           }
         }
+
+        setSession(np)
+        if (typeof v === 'number' && Number.isFinite(v)) setVol(v)
       } catch {
         // Fallback
       }
@@ -3243,6 +3261,22 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
       clearInterval(id)
     }
   }, [])
+
+  // Immediate reset on track change so scrubber never shows previous track time
+  useEffect(() => {
+    if (!session?.title) return
+    const key = `${session.title}|${session.artist || ''}`
+    if (lastTrackKeyRef.current && lastTrackKeyRef.current !== key) {
+      lastSeekTimeRef.current = 0
+      lastSyncRef.current = {
+        pos: session.position || 0,
+        time: performance.now(),
+        playing: session.playing,
+      }
+      setLivePos(session.position || 0)
+    }
+    lastTrackKeyRef.current = key
+  }, [session?.title, session?.artist])
 
   // High-precision smooth position interpolator (1:1 lockstep with real audio, zero drift, stops when paused)
   const playingState = session?.playing ?? isPlaying
@@ -3261,14 +3295,15 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
           const dur = session?.duration || 0
           const current = dur > 0 ? Math.min(dur, pos + elapsed) : pos + elapsed
           setLivePos(current)
-          // When loop is active and audio approaches within 2.0s of the end (before YouTube's queue switches track):
-          // seamlessly replay from the beginning!
-          const loopThreshold = dur > 6 ? dur - 2.0 : Math.max(0.5, dur - 0.8)
-          if (isLooping && dur > 2 && current >= loopThreshold) {
+          // Autoloop for browser playback (Chrome/Edge YouTube mixes)
+          const isBrowser = /chrome|edge|firefox|opera|brave|msedge/i.test(session?.source || '')
+          const loopThreshold = dur > 6 ? dur - 2.8 : Math.max(0.5, dur - 1.2)
+          if (isLooping && isBrowser && dur > 2 && current >= loopThreshold) {
             const now = performance.now()
             if (now - lastLoopSeekTimeRef.current > 2500) {
               lastLoopSeekTimeRef.current = now
               handleSeek(0)
+              mediaControl('play').catch(() => {})
             }
           }
         }
@@ -3287,7 +3322,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
       }
     }, 100)
     return () => clearInterval(id)
-  }, [playingState, session?.duration, currentMock.duration, isLooping, isPlaying])
+  }, [playingState, session?.duration, session?.source, currentMock.duration, isLooping, isPlaying])
 
   const playbackPos = livePos
 
@@ -3527,6 +3562,9 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     ;(e.currentTarget as HTMLElement)?.blur()
     if (isLooping) {
       handleSeek(0)
+      if (isTauri()) {
+        mediaControl('play').catch(() => {})
+      }
       return
     }
     const canPrev = session?.canSkipPrev ?? true
@@ -3537,6 +3575,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
       if (!canPrev || livePos > 3) {
         mediaSeek(0).catch(() => {})
       }
+      lastSeekTimeRef.current = performance.now()
       lastSyncRef.current = { pos: 0, time: performance.now(), playing: true }
       setLivePos(0)
     } else {
@@ -3549,6 +3588,9 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     ;(e.currentTarget as HTMLElement)?.blur()
     if (isLooping) {
       handleSeek(0)
+      if (isTauri()) {
+        mediaControl('play').catch(() => {})
+      }
       return
     }
     const canNext = session?.canSkipNext ?? true
@@ -3560,6 +3602,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
       if (!canNext && dur > 2) {
         mediaSeek(dur - 0.2).catch(() => {})
       }
+      lastSeekTimeRef.current = performance.now()
       lastSyncRef.current = { pos: 0, time: performance.now(), playing: true }
       setLivePos(0)
     } else {

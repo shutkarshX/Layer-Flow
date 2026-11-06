@@ -888,6 +888,7 @@ fn media_thread(
     // When a command was applied at the bottom of the previous iteration, skip
     // the album-art read on the next snapshot so back-to-back presses stay fast.
     let mut skip_thumb_next = false;
+    let mut active_session: Option<windows::Media::Control::GlobalSystemMediaTransportControlsSession> = None;
     loop {
         if mgr.is_none() {
             mgr = Mgr::RequestAsync().ok().and_then(|op| await_op(op, 4000));
@@ -911,17 +912,14 @@ fn media_thread(
         // following snapshot skip the slower art read so playback stays snappy.
         let mut did_cmd = skip_thumb_next;
         skip_thumb_next = false;
-        let (src, is_playing) = np
-            .lock()
-            .map(|g| (g.source.clone(), g.playing))
-            .unwrap_or_default();
         while let Ok(cmd) = rx.try_recv() {
-            apply(m, cmd, &src, is_playing);
+            apply(m, &active_session, cmd);
             did_cmd = true;
         }
         match read_session(m, &mut thumb_cache, did_cmd) {
-            Ok(snap) => {
+            Ok((snap, sess)) => {
                 fails = 0;
+                active_session = sess;
                 if let Ok(mut g) = np.lock() {
                     *g = snap;
                 }
@@ -932,6 +930,7 @@ fn media_thread(
                 if fails >= 3 {
                     fails = 0;
                     mgr = None;
+                    active_session = None;
                 }
             }
         }
@@ -941,11 +940,7 @@ fn media_thread(
         match rx.recv_timeout(Duration::from_millis(800)) {
             Ok(cmd) => {
                 if let Some(m2) = mgr.as_ref() {
-                    let (src, is_playing) = np
-                        .lock()
-                        .map(|g| (g.source.clone(), g.playing))
-                        .unwrap_or_default();
-                    apply(m2, cmd, &src, is_playing);
+                    apply(m2, &active_session, cmd);
                     skip_thumb_next = true;
                 }
             }
@@ -960,7 +955,7 @@ fn read_session(
     mgr: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager,
     thumb_cache: &mut ThumbCache,
     skip_thumb: bool,
-) -> windows::core::Result<NowPlaying> {
+) -> windows::core::Result<(NowPlaying, Option<windows::Media::Control::GlobalSystemMediaTransportControlsSession>)> {
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status;
 
     let list = mgr.GetSessions()?;
@@ -983,7 +978,7 @@ fn read_session(
             // No sessions at all → every media app is closed. Report "nothing
             // playing" (not an error) so the widget clears instead of holding
             // the last track.
-            Err(_) => return Ok(NowPlaying::default()),
+            Err(_) => return Ok((NowPlaying::default(), None)),
         },
     };
 
@@ -1047,7 +1042,7 @@ fn read_session(
         }
     }
     np.thumb = thumb_cache.art.clone();
-    Ok(np)
+    Ok((np, Some(session)))
 }
 
 // Read the media session's thumbnail into a `data:` URL. Bounded by await_op
@@ -1096,51 +1091,18 @@ fn send_extended_media_key(vk: u8, scan: u8) {
 #[cfg(target_os = "windows")]
 fn apply(
     mgr: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager,
+    active_session: &Option<windows::Media::Control::GlobalSystemMediaTransportControlsSession>,
     cmd: Cmd,
-    current_source: &str,
-    is_currently_playing: bool,
 ) {
-    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status;
-
-    let session = (|| {
+    let session = active_session.clone().or_else(|| {
         let list = mgr.GetSessions().ok()?;
         let sessions: Vec<_> = (&list).into_iter().collect();
-
-        // 1. Prefer session that is currently Playing
-        if let Some(s) = sessions.iter().find(|s| {
-            s.GetPlaybackInfo()
-                .and_then(|i| i.PlaybackStatus())
-                .map(|st| st == Status::Playing)
-                .unwrap_or(false)
-        }) {
-            return Some(s.clone());
-        }
-
-        // 2. Prefer session matching current widget source (e.g. Chrome, Spotify)
-        if !current_source.is_empty() {
-            if let Some(s) = sessions.iter().find(|s| {
-                s.SourceAppUserModelId()
-                    .map(|id| id.to_string().eq_ignore_ascii_case(current_source))
-                    .unwrap_or(false)
-            }) {
-                return Some(s.clone());
-            }
-        }
-
-        // 3. Fallback to OS current session
-        if let Ok(s) = mgr.GetCurrentSession() {
-            return Some(s);
-        }
-
-        // 4. Fallback to first existing session
         sessions.into_iter().next()
-    })();
+    });
 
     if let Some(s) = session.as_ref() {
         match cmd {
             Cmd::Next => {
-                // Call both WinRT async skip and extended hardware media key so web players (YouTube/Chrome)
-                // and native apps (Spotify) skip tracks reliably without being ignored.
                 let _ = s.TrySkipNextAsync();
                 send_extended_media_key(0xB0, 0x19);
             }
@@ -1149,23 +1111,14 @@ fn apply(
                 send_extended_media_key(0xB1, 0x10);
             }
             Cmd::Play => {
-                if !is_currently_playing {
-                    let _ = s.TryPlayAsync();
-                }
+                let _ = s.TryPlayAsync();
             }
             Cmd::Pause => {
-                if is_currently_playing {
-                    let _ = s.TryPauseAsync();
-                }
+                let _ = s.TryPauseAsync();
             }
             Cmd::Toggle => {
                 let mut toggled = false;
-                let op = if is_currently_playing {
-                    s.TryPauseAsync()
-                } else {
-                    s.TryPlayAsync()
-                };
-                if let Ok(op) = op {
+                if let Ok(op) = s.TryTogglePlayPauseAsync() {
                     if let Some(ok) = await_op(op, 800) {
                         toggled = ok;
                     }
@@ -1194,9 +1147,7 @@ fn apply(
     } else {
         // Fallback if no active SMTC session exists at all
         match cmd {
-            Cmd::Toggle => send_extended_media_key(0xB3, 0x22),
-            Cmd::Play => send_extended_media_key(0xB3, 0x22),
-            Cmd::Pause => send_extended_media_key(0xB3, 0x22),
+            Cmd::Toggle | Cmd::Play | Cmd::Pause => send_extended_media_key(0xB3, 0x22),
             Cmd::Next => send_extended_media_key(0xB0, 0x19),
             Cmd::Prev => send_extended_media_key(0xB1, 0x10),
             _ => {}

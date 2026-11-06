@@ -810,6 +810,8 @@ pub struct NowPlaying {
     // Playback position + track length in seconds (0 when the app reports none).
     position: f64,
     duration: f64,
+    can_skip_next: bool,
+    can_skip_prev: bool,
 }
 
 // ── Now Playing via a long-lived SMTC worker ────────────────────────────────
@@ -998,6 +1000,13 @@ fn read_session(
             .PlaybackStatus()
             .map(|s| s == Status::Playing)
             .unwrap_or(false);
+        if let Ok(controls) = info.Controls() {
+            np.can_skip_next = controls.IsNextEnabled().unwrap_or(true);
+            np.can_skip_prev = controls.IsPreviousEnabled().unwrap_or(true);
+        } else {
+            np.can_skip_next = true;
+            np.can_skip_prev = true;
+        }
     }
     if let Ok(src) = session.SourceAppUserModelId() {
         np.source = src.to_string();

@@ -3468,6 +3468,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
 
   const togglePlay = (e: React.MouseEvent) => {
     e.stopPropagation()
+    ;(e.currentTarget as HTMLElement)?.blur()
     const currentPlaying = session?.playing ?? isPlaying
     const nextPlaying = !currentPlaying
     lastToggleTimeRef.current = performance.now()
@@ -3485,10 +3486,17 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
 
   const prevTrack = (e: React.MouseEvent) => {
     e.stopPropagation()
-    lastSyncRef.current = { pos: 0, time: performance.now(), playing: true }
-    setLivePos(0)
+    ;(e.currentTarget as HTMLElement)?.blur()
+    const canPrev = session?.canSkipPrev ?? true
     if (isTauri()) {
       mediaControl('prev').catch(() => {})
+      // On standalone YouTube videos where prevtrack is disabled or when > 3s in,
+      // rewind cleanly to 0:00!
+      if (!canPrev || livePos > 3) {
+        mediaSeek(0).catch(() => {})
+      }
+      lastSyncRef.current = { pos: 0, time: performance.now(), playing: true }
+      setLivePos(0)
     } else {
       setMockIndex((prev) => (prev - 1 + MOCK_PLAYLIST.length) % MOCK_PLAYLIST.length)
     }
@@ -3496,10 +3504,18 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
 
   const nextTrack = (e: React.MouseEvent) => {
     e.stopPropagation()
-    lastSyncRef.current = { pos: 0, time: performance.now(), playing: true }
-    setLivePos(0)
+    ;(e.currentTarget as HTMLElement)?.blur()
+    const canNext = session?.canSkipNext ?? true
+    const dur = session?.duration || 0
     if (isTauri()) {
       mediaControl('next').catch(() => {})
+      // On standalone YouTube videos where nexttrack is disabled,
+      // seek to the end (dur - 0.2s) so YouTube's autoplay immediately plays the next video!
+      if (!canNext && dur > 2) {
+        mediaSeek(dur - 0.2).catch(() => {})
+      }
+      lastSyncRef.current = { pos: 0, time: performance.now(), playing: true }
+      setLivePos(0)
     } else {
       setMockIndex((prev) => (prev + 1) % MOCK_PLAYLIST.length)
     }
@@ -3536,16 +3552,16 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     if (controlsLayout === 'hidden') return null
     const iconSize = isCompactHeader ? 14 : arrowIconSize
     const playBtnClass = isCompactHeader
-      ? 'flex h-6 w-6 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--on-accent)] shadow-sm hover:scale-105 active:scale-95 transition-transform'
+      ? 'flex h-6 w-6 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--on-accent)] shadow-sm hover:scale-105 active:scale-95 transition-transform outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none'
       : isLargeButtons
-        ? 'flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--on-accent)] shadow-md hover:scale-105 active:scale-95 transition-transform'
-        : 'flex h-9 w-9 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--on-accent)] shadow-md hover:scale-105 active:scale-95 transition-transform'
+        ? 'flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--on-accent)] shadow-md hover:scale-105 active:scale-95 transition-transform outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none'
+        : 'flex h-9 w-9 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--on-accent)] shadow-md hover:scale-105 active:scale-95 transition-transform outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none'
     const playIconSize = isCompactHeader ? 11 : isLargeButtons ? 20 : 17
     const btnBoxClass = isCompactHeader
-      ? 'flex h-6 w-6 items-center justify-center text-white/80 hover:text-white hover:scale-110 active:scale-95 transition-all'
+      ? 'flex h-6 w-6 items-center justify-center text-white/80 hover:text-white hover:scale-110 active:scale-95 transition-all outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none'
       : isLargeButtons
-        ? 'flex h-9 w-9 items-center justify-center text-white/80 hover:text-white hover:scale-110 active:scale-95 transition-all'
-        : 'flex h-8 w-8 items-center justify-center text-white/80 hover:text-white hover:scale-110 active:scale-95 transition-all'
+        ? 'flex h-9 w-9 items-center justify-center text-white/80 hover:text-white hover:scale-110 active:scale-95 transition-all outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none'
+        : 'flex h-8 w-8 items-center justify-center text-white/80 hover:text-white hover:scale-110 active:scale-95 transition-all outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none'
 
     return (
       <div className={`flex shrink-0 items-center ${isCompactHeader ? 'gap-1' : 'gap-2'}`}>

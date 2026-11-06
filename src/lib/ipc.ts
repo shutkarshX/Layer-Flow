@@ -84,6 +84,8 @@ export interface NowPlaying {
   // Playback position + length in seconds (0 when the app reports none).
   position: number
   duration: number
+  canSkipNext?: boolean
+  canSkipPrev?: boolean
 }
 
 export const getNowPlaying = () => invoke<NowPlaying>('get_now_playing')

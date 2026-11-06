@@ -12,7 +12,8 @@ import {
   mediaSeek,
   mediaRepeat,
   setVolume,
-  getAudioPeak,
+  getAudioSpectrum,
+  type AudioSpectrum,
   type NowPlaying,
 } from '../../lib/ipc'
 import type {
@@ -1379,6 +1380,7 @@ function SubwooferHaloArtwork({
   beatOffset = 0,
   onTapBeatSync,
   liveAudioPeakRef,
+  liveSpectrumRef,
 }: {
   thumb: string
   title: string
@@ -1391,6 +1393,7 @@ function SubwooferHaloArtwork({
   beatOffset?: number
   onTapBeatSync?: () => void
   liveAudioPeakRef?: React.MutableRefObject<number>
+  liveSpectrumRef?: React.MutableRefObject<AudioSpectrum>
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const coneRef = useRef<HTMLDivElement>(null)
@@ -1459,11 +1462,14 @@ function SubwooferHaloArtwork({
       const beatPhase = (beatProgress % 1.0 + 1.0) % 1.0
       const currentBeatInt = Math.floor(beatProgress)
 
-      // Real-time hardware audio peak reactivity (or beat fallback)
+      // Genuine Hardware Spectrum Audio Reactivity
+      const spec = liveSpectrumRef?.current
+      const isLiveSpectrum = !!(spec?.isActive && (spec.bass > 0.005 || spec.volume > 0.003))
       const livePeak = liveAudioPeakRef?.current || 0
-      const isLiveHardware = livePeak > 0.005
+      const isLiveHardware = isLiveSpectrum || livePeak > 0.005
+      const realBass = isLiveSpectrum ? spec!.bass : livePeak
       const kick = isLiveHardware
-        ? Math.min(1.0, Math.pow(livePeak * 1.35, 1.45))
+        ? Math.min(1.0, Math.pow(realBass * 1.35, 1.4))
         : (playing ? Math.pow(Math.max(0, 1 - beatPhase * 3.4), 2.2) : 0)
       const snarePhase = ((beatPhase + 0.5) % 1.0 + 1.0) % 1.0
       const snare = playing ? Math.pow(Math.max(0, 1 - snarePhase * 3.2), 2.0) : 0
@@ -1649,6 +1655,7 @@ function ArtworkRenderer({
   beatOffset = 0,
   onTapBeatSync,
   liveAudioPeakRef,
+  liveSpectrumRef,
 }: {
   thumb: string
   title: string
@@ -1664,6 +1671,7 @@ function ArtworkRenderer({
   beatOffset?: number
   onTapBeatSync?: () => void
   liveAudioPeakRef?: React.MutableRefObject<number>
+  liveSpectrumRef?: React.MutableRefObject<AudioSpectrum>
 }) {
   // When Beat Visualizer is 'halo', the artwork becomes the iconic Trap Nation Subwoofer Bass Halo!
   if (visualizerType === 'halo') {
@@ -1680,6 +1688,7 @@ function ArtworkRenderer({
         beatOffset={beatOffset}
         onTapBeatSync={onTapBeatSync}
         liveAudioPeakRef={liveAudioPeakRef}
+        liveSpectrumRef={liveSpectrumRef}
       />
     )
   }
@@ -2157,6 +2166,7 @@ interface VisualizerCanvasProps {
   title?: string
   artist?: string
   liveAudioPeakRef?: React.MutableRefObject<number>
+  liveSpectrumRef?: React.MutableRefObject<AudioSpectrum>
 }
 
 function VisualizerCanvas({
@@ -2167,14 +2177,13 @@ function VisualizerCanvas({
   title,
   artist,
   liveAudioPeakRef,
+  liveSpectrumRef,
 }: VisualizerCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const peaksRef = useRef<number[]>([])
   const smoothRef = useRef<number[]>([])
   const needleRef = useRef<number>(0)
   const pulseRingsRef = useRef<{ radius: number; alpha: number }[]>([])
-  const maxPeakRef = useRef<number>(0.15)
-  const smoothPeakRef = useRef<number>(0)
   const prevPeakRef = useRef<number>(0)
   const posRef = useRef(playbackPos)
   posRef.current = playbackPos
@@ -2234,47 +2243,33 @@ function VisualizerCanvas({
 
       const baseColor = getSafeCanvasColor(color)
 
-      // ── Real Hardware Audio Peak Reactivity with Automatic Gain Control (AGC) ──
+      // ── Genuine Hardware Spectrum FFT Audio Reactivity ──
+      const spec = liveSpectrumRef?.current
+      const isLiveSpectrum = !!(spec?.isActive && (spec.bass > 0.003 || spec.mid > 0.003 || spec.volume > 0.002))
       const rawPeak = liveAudioPeakRef?.current || 0
-      const isHardware = rawPeak > 0.003
+      const isHardware = isLiveSpectrum || rawPeak > 0.003
 
-      // Dynamic automatic gain adaptation (works at 10% volume, 50% volume, or 100% volume)
-      let maxPeak = maxPeakRef.current
-      if (rawPeak > maxPeak) {
-        maxPeak = Math.min(1.0, rawPeak)
-      } else {
-        // Slow natural decay over ~3.5 seconds
-        maxPeak = Math.max(0.06, maxPeak * 0.995)
-      }
-      maxPeakRef.current = maxPeak
+      // Direct Frequency Energies (Real Sub-Bass/Kick, Real Vocals/Mids, Real Highs)
+      const realBass = isLiveSpectrum ? spec!.bass : rawPeak
+      const realMid = isLiveSpectrum ? spec!.mid : rawPeak * 0.6
+      const realTreble = isLiveSpectrum ? spec!.treble : rawPeak * 0.4
+      const realBins = isLiveSpectrum ? spec!.bins : null
 
-      // Normalized peak scaled against recent local maximum (0.0 to 1.0)
-      const normalizedPeak = isHardware ? Math.min(1.0, rawPeak / Math.max(0.05, maxPeak)) : 0
-
-      // Instantaneous attack on beat rise, smooth release on decay
-      let smoothPeak = smoothPeakRef.current
-      if (normalizedPeak > smoothPeak) {
-        smoothPeak += (normalizedPeak - smoothPeak) * 0.90 // ultra-punchy attack
-      } else {
-        smoothPeak += (normalizedPeak - smoothPeak) * 0.20 // natural musical release
-      }
-      smoothPeakRef.current = smoothPeak
-
-      // Transient bass kick detection: rapid surge in energy
-      const peakDelta = normalizedPeak - prevPeakRef.current
-      const isTransient = normalizedPeak > 0.35 && peakDelta > 0.14
-      prevPeakRef.current = normalizedPeak
+      // Transient bass kick detection from physical low frequencies
+      const bassDelta = realBass - prevPeakRef.current
+      const isTransient = realBass > 0.28 && bassDelta > 0.10
+      prevPeakRef.current = realBass
 
       // ── High Dynamic Range Beat & Rhythm Engine ──
       const beatSec = 60 / bpm
       const beatProgress = localPos / beatSec
-      const beatPhase = beatProgress % 1.0 // 0.0 to 1.0 on every single musical beat
+      const beatPhase = beatProgress % 1.0
       const currentBeatInt = Math.floor(beatProgress)
 
-      // Fallback synthetic kick vs real hardware audio kick
+      // Fallback synthetic kick vs real physical bass kick
       const synthKick = playing ? Math.pow(Math.max(0, 1 - beatPhase * 3.4), 2.2) : 0
       const kick = isHardware
-        ? Math.min(1.0, Math.pow(smoothPeak, 1.2) * 1.1 + (isTransient ? 0.35 : 0))
+        ? Math.min(1.0, Math.pow(realBass, 1.2) * 1.35 + (isTransient ? 0.35 : 0))
         : synthKick
 
       // Spawn expanding shockwave ring on physical bass kick
@@ -2289,37 +2284,36 @@ function VisualizerCanvas({
       // Snappy snare impulse (accents beat 2 and 4)
       const snarePhase = (beatPhase + 0.5) % 1.0
       const snare = isHardware
-        ? Math.min(1.0, smoothPeak * 0.85)
+        ? Math.min(1.0, realMid * 1.2)
         : (playing ? Math.pow(Math.max(0, 1 - snarePhase * 3.2), 2.0) : 0)
       // 16th-note hi-hat tick
       const hatPhase = (beatProgress * 4) % 1.0
       const hat = isHardware
-        ? Math.min(1.0, smoothPeak * 0.6)
+        ? Math.min(1.0, realTreble * 1.3)
         : (playing ? Math.pow(Math.max(0, 1 - hatPhase * 3.8), 1.8) : 0)
 
-      // Compute multi-band frequency energies
+      // Compute multi-band frequency energies (Driven directly by FFT bins if available!)
       for (let i = 0; i < BIN_COUNT; i++) {
-        const norm = i / BIN_COUNT
-        // Sub-bass & kick (bins 0-7)
-        const bass = Math.max(0, 1 - norm * 2.8) * (kick * 1.25 + (isHardware ? smoothPeak * 0.45 : 0.06))
-        // Mid-range vocal & snare (bins 8-20)
-        const midDist = Math.abs(norm - 0.44) * 2.6
-        const mid = Math.max(0, 1 - midDist) * (snare * 0.85 + 0.10)
-        // Treble & percussion shimmer (bins 21-31)
-        const treble = Math.max(0, (norm - 0.5) * 2.2) * (hat * 0.8 + 0.08)
-        // Musical harmonic cadence
-        const harm =
-          (Math.sin(localPos * 7.5 + i * 0.75) * 0.08 +
-          Math.cos(localPos * 4.2 - i * 0.55) * 0.05) * (isHardware ? Math.min(1.0, smoothPeak * 2.5) : 1)
+        let rawAmp = 0.02
+        if (realBins && realBins.length === BIN_COUNT && isLiveSpectrum) {
+          // Direct 1:1 hardware FFT frequency bin energy!
+          rawAmp = Math.min(1.0, Math.max(0.02, realBins[i]! * 1.15))
+        } else {
+          const norm = i / BIN_COUNT
+          const bassBand = Math.max(0, 1 - norm * 2.8) * (kick * 1.25 + 0.04)
+          const midDist = Math.abs(norm - 0.44) * 2.6
+          const midBand = Math.max(0, 1 - midDist) * (snare * 0.85 + 0.08)
+          const trebleBand = Math.max(0, (norm - 0.5) * 2.2) * (hat * 0.8 + 0.06)
+          const harm = (Math.sin(localPos * 7.5 + i * 0.75) * 0.06 + Math.cos(localPos * 4.2 - i * 0.55) * 0.04) * (isHardware ? Math.min(1.0, realBass * 2.5) : 1)
+          rawAmp = playing ? Math.min(1.0, Math.max(0.02, bassBand + midBand + trebleBand + harm)) : 0.02
+        }
 
-        const rawAmp = playing ? Math.min(1.0, Math.max(0.02, bass + mid + treble + harm)) : 0.02
         const targetH = rawAmp * (h - 4)
-
         const cur = smoothRef.current[i] ?? 0
         if (targetH > cur) {
-          smoothRef.current[i] = cur + (targetH - cur) * 0.85 // explosive attack
+          smoothRef.current[i] = cur + (targetH - cur) * 0.88 // explosive attack
         } else {
-          smoothRef.current[i] = cur * (playing ? 0.83 : 0.7) // natural decay
+          smoothRef.current[i] = cur * (playing ? 0.82 : 0.7) // natural musical decay
         }
 
         const curVal = smoothRef.current[i] ?? 0
@@ -2327,7 +2321,7 @@ function VisualizerCanvas({
         if (curVal > p) {
           peaksRef.current[i] = curVal
         } else {
-          peaksRef.current[i] = Math.max(2, p - 0.7) // gravitational drop
+          peaksRef.current[i] = Math.max(2, p - 0.6) // gravitational drop
         }
       }
 
@@ -2339,7 +2333,7 @@ function VisualizerCanvas({
         const barW = 3
         const gap = 2
         const n = Math.floor(w / (barW + gap))
-        const amp = playing ? (isHardware ? Math.min(1.0, 0.12 + smoothPeak * 0.88) : 0.95) : 0.08
+        const amp = playing ? (isHardware ? Math.min(1.0, 0.12 + realBass * 0.88) : 0.95) : 0.08
         const t = localPos * 4.2
 
         ctx.fillStyle = baseColor
@@ -2394,23 +2388,23 @@ function VisualizerCanvas({
       else if (type === 'wave') {
         const points: { x: number; y: number }[] = []
         // Dynamic amplitude:
-        // Quiet / Speech: amp is ~h * 0.08 (subtle, calm line)
-        // Bass Drop / Kick: amp expands to ~h * 0.52 (soaring, physical bass pulse)
-        // Paused: h * 0.04
-        const energy = isHardware ? smoothPeak : (playing ? 0.35 + kick * 0.45 : 0.04)
-        const amp = playing ? h * (0.07 + energy * 0.46) : h * 0.04
+        // Quiet / Speech (realBass is 0.0): amp is subtle (~h * 0.07 + realMid * 0.12)
+        // Bass Drop / Kick: realBass explodes to 0.7-1.0, soaring up to h * 0.52!
+        const bassExcursion = isHardware ? realBass : kick
+        const midEnergy = isHardware ? realMid : 0.2
+        const amp = playing ? h * (0.06 + bassExcursion * 0.42 + midEnergy * 0.12) : h * 0.04
         const step = Math.max(3, Math.floor(w / 70))
 
-        // Center subwoofer excursion punch
-        const centerExcursion = kick > 0.18 ? (kick - 0.18) * h * 0.35 : 0
+        // Center subwoofer excursion punch (pumps dynamically on real bass hits!)
+        const centerExcursion = bassExcursion > 0.12 ? (bassExcursion - 0.12) * h * 0.38 : 0
 
-        // Continuous phase rolling with sound
+        // Phase rolling
         const phase = localPos * 4.0
 
         for (let x = 0; x <= w; x += step) {
           const normX = (x / w) * Math.PI * 4
           const centerWeight = Math.sin((x / w) * Math.PI)
-          // Bi-directional symmetrical excursion: bounces UP and DOWN on kick hits!
+          // Bi-directional symmetrical excursion: bounces UP and DOWN on real bass kick hits!
           const kickBounce = Math.sin(normX * 2.0) * centerWeight * centerExcursion
           const y =
             h / 2 +
@@ -2433,7 +2427,7 @@ function VisualizerCanvas({
           ctx.lineTo(w, h)
           ctx.closePath()
 
-          const fillAlpha = Math.min(0.48, 0.06 + energy * 0.38)
+          const fillAlpha = Math.min(0.48, 0.06 + bassExcursion * 0.38)
           const fillGrad = ctx.createLinearGradient(0, 0, 0, h)
           safeAddColorStop(fillGrad, 0, `rgba(56, 189, 248, ${fillAlpha.toFixed(2)})`, 'transparent')
           safeAddColorStop(fillGrad, 1, 'rgba(56, 189, 248, 0.01)', 'transparent')
@@ -2446,7 +2440,7 @@ function VisualizerCanvas({
         ctx.lineWidth = 2.4
         ctx.strokeStyle = '#ffffff'
         ctx.shadowColor = baseColor
-        ctx.shadowBlur = playing ? Math.floor(4 + energy * 22) : 2
+        ctx.shadowBlur = playing ? Math.floor(4 + bassExcursion * 22) : 2
 
         if (firstPt) {
           ctx.moveTo(firstPt.x, firstPt.y)
@@ -2465,7 +2459,7 @@ function VisualizerCanvas({
         const midX = w / 2
         const cy = h / 2
         const halfBins = Math.floor(BIN_COUNT / 2)
-        const coreRadius = Math.max(6, Math.min(h * 0.36, 16) + kick * 4)
+        const coreRadius = Math.max(6, Math.min(h * 0.36, 16) + (isHardware ? realBass * 8 : kick * 5))
 
         // Pulsing glowing center core
         ctx.beginPath()
@@ -2522,7 +2516,7 @@ function VisualizerCanvas({
         // High-sensitivity ballistic drive: hits red zone on kicks!
         const targetVal = playing
           ? (isHardware
-              ? Math.min(1.0, smoothPeak * 1.25 + (isTransient ? 0.25 : 0))
+              ? Math.min(1.0, realBass * 1.25 + (isTransient ? 0.25 : 0))
               : Math.min(1.0, 0.12 + kick * 0.72 + ((smoothRef.current[2] || 0) / (h - 4)) * 0.55))
           : 0
         needleRef.current += (targetVal - needleRef.current) * (targetVal > needleRef.current ? 0.75 : 0.22)
@@ -3094,6 +3088,14 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
   const [discoveredThumb, setDiscoveredThumb] = useState<string | null>(null)
   const lastSeekTimeRef = useRef<number>(0)
   const liveAudioPeakRef = useRef<number>(0)
+  const liveSpectrumRef = useRef<AudioSpectrum>({
+    bins: new Array(32).fill(0),
+    bass: 0,
+    mid: 0,
+    treble: 0,
+    volume: 0,
+    isActive: false,
+  })
   const [lyrics, setLyrics] = useState<LyricLine[]>(() => parseLrc(currentMock.lyrics))
   const [activeLyricIdx, setActiveLyricIdx] = useState<number>(0)
   const [isKaraokeOpen, setIsKaraokeOpen] = useState<boolean>(false)
@@ -3133,31 +3135,45 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     updateWallpaper()
   }, [])
 
-  // Real-time Hardware Audio Peak Listener & direct atomic poller
+  // Real-time Hardware FFT Spectrum & Audio Peak Listener
   useEffect(() => {
     if (!isTauri()) return
-    let unlisten: (() => void) | null = null
+    let unlistenPeak: (() => void) | null = null
+    let unlistenSpec: (() => void) | null = null
+
     listen<number>('audio-peak', (e) => {
       liveAudioPeakRef.current = e.payload
     })
       .then((un) => {
-        unlisten = un
+        unlistenPeak = un
       })
       .catch(() => {})
 
-    // Direct atomic poller (40 FPS, 25ms) reads Rust atomic memory directly via IPC
+    listen<AudioSpectrum>('audio-spectrum', (e) => {
+      if (e.payload) {
+        liveSpectrumRef.current = e.payload
+      }
+    })
+      .then((un) => {
+        unlistenSpec = un
+      })
+      .catch(() => {})
+
+    // Direct atomic spectrum poller (50 FPS, 20ms) directly reads Rust WASAPI FFT engine via IPC
     const pollInterval = setInterval(() => {
-      getAudioPeak()
-        .then((val) => {
-          if (typeof val === 'number') {
-            liveAudioPeakRef.current = val
+      getAudioSpectrum()
+        .then((spec) => {
+          if (spec && Array.isArray(spec.bins)) {
+            liveSpectrumRef.current = spec
+            liveAudioPeakRef.current = spec.volume
           }
         })
         .catch(() => {})
-    }, 25)
+    }, 20)
 
     return () => {
-      if (unlisten) unlisten()
+      if (unlistenPeak) unlistenPeak()
+      if (unlistenSpec) unlistenSpec()
       clearInterval(pollInterval)
     }
   }, [])
@@ -3971,7 +3987,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                   playbackPos={playbackPos}
                   title={np.title}
                   artist={np.artist}
-                  liveAudioPeakRef={liveAudioPeakRef}
+                  liveAudioPeakRef={liveAudioPeakRef} liveSpectrumRef={liveSpectrumRef}
                 />
               </div>
             )}
@@ -4074,7 +4090,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                       design={artDesign}
                       isHero
                       adaptiveRatio={adaptiveArtRatio}
-                      liveAudioPeakRef={liveAudioPeakRef}
+                      liveAudioPeakRef={liveAudioPeakRef} liveSpectrumRef={liveSpectrumRef}
                       playing={np.playing}
                       visualizerType={visualizerType}
                       visualizerColor={visualizerColor}
@@ -4138,7 +4154,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                         playbackPos={playbackPos}
                         title={np.title}
                         artist={np.artist}
-                        liveAudioPeakRef={liveAudioPeakRef}
+                        liveAudioPeakRef={liveAudioPeakRef} liveSpectrumRef={liveSpectrumRef}
                       />
                     </HudElementWrapper>
                   )}
@@ -4247,7 +4263,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                       playbackPos={playbackPos}
                       title={np.title}
                       artist={np.artist}
-                      liveAudioPeakRef={liveAudioPeakRef}
+                      liveAudioPeakRef={liveAudioPeakRef} liveSpectrumRef={liveSpectrumRef}
                     />
                   </HudElementWrapper>
                 )}
@@ -4297,7 +4313,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                         design={artDesign}
                         size={fluidThumbSize}
                         adaptiveRatio={adaptiveArtRatio}
-                        liveAudioPeakRef={liveAudioPeakRef}
+                        liveAudioPeakRef={liveAudioPeakRef} liveSpectrumRef={liveSpectrumRef}
                         playing={np.playing}
                         visualizerType={visualizerType}
                         visualizerColor={visualizerColor}
@@ -4363,7 +4379,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                       playbackPos={playbackPos}
                       title={np.title}
                       artist={np.artist}
-                      liveAudioPeakRef={liveAudioPeakRef}
+                      liveAudioPeakRef={liveAudioPeakRef} liveSpectrumRef={liveSpectrumRef}
                     />
                   </HudElementWrapper>
                 )}

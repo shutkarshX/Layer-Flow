@@ -1211,6 +1211,11 @@ pub fn get_audio_peak() -> f32 {
     crate::audio::get_audio_peak()
 }
 
+#[tauri::command]
+pub fn get_audio_spectrum() -> crate::audio::AudioSpectrum {
+    crate::audio::get_audio_spectrum()
+}
+
 #[derive(serde::Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationItem {

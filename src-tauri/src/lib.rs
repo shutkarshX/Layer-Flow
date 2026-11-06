@@ -261,6 +261,7 @@ pub fn run() {
             commands::media_seek,
             commands::media_repeat,
             commands::get_audio_peak,
+            commands::get_audio_spectrum,
             commands::get_notifications,
             commands::clear_notification,
             commands::clear_all_notifications,

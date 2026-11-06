@@ -99,8 +99,20 @@ export const mediaSeek = (position: number) =>
 export const mediaRepeat = (repeat: boolean) =>
   invoke<void>('media_repeat', { repeat })
 
+export interface AudioSpectrum {
+  bins: number[]
+  bass: number
+  mid: number
+  treble: number
+  volume: number
+  isActive: boolean
+}
+
 export const getAudioPeak = () =>
   invoke<number>('get_audio_peak')
+
+export const getAudioSpectrum = () =>
+  invoke<AudioSpectrum>('get_audio_spectrum')
 
 export interface NotificationItem {
   id: number

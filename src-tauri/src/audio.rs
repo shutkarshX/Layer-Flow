@@ -3,6 +3,17 @@
 // the default device, so we use the undocumented IPolicyConfig COM interface
 // (the same approach NirCmd / SoundSwitch / AudioDeviceCmdlets use).
 
+#[derive(serde::Serialize, Clone, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioSpectrum {
+    pub bins: Vec<f32>,
+    pub bass: f32,
+    pub mid: f32,
+    pub treble: f32,
+    pub volume: f32,
+    pub is_active: bool,
+}
+
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioDevice {
@@ -378,8 +389,79 @@ mod imp {
     }
     static AUDIO_PEAK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+    use super::AudioSpectrum;
+    use std::sync::OnceLock;
+
+    static AUDIO_SPECTRUM: OnceLock<std::sync::Mutex<AudioSpectrum>> = OnceLock::new();
+
+    fn spectrum_store() -> &'static std::sync::Mutex<AudioSpectrum> {
+        AUDIO_SPECTRUM.get_or_init(|| {
+            std::sync::Mutex::new(AudioSpectrum {
+                bins: vec![0.0; 32],
+                bass: 0.0,
+                mid: 0.0,
+                treble: 0.0,
+                volume: 0.0,
+                is_active: false,
+            })
+        })
+    }
+
+    pub fn get_audio_spectrum() -> AudioSpectrum {
+        if let Ok(guard) = spectrum_store().lock() {
+            guard.clone()
+        } else {
+            AudioSpectrum {
+                bins: vec![0.0; 32],
+                bass: 0.0,
+                mid: 0.0,
+                treble: 0.0,
+                volume: 0.0,
+                is_active: false,
+            }
+        }
+    }
+
     pub fn get_audio_peak() -> f32 {
         f32::from_bits(AUDIO_PEAK.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    // In-place Cooley-Tukey Radix-2 FFT (Zero allocations, microsecond execution)
+    fn fft_radix2(buf: &mut [(f32, f32)]) {
+        let n = buf.len();
+        if n <= 1 { return; }
+        let mut j = 0;
+        for i in 0..n {
+            if i < j {
+                buf.swap(i, j);
+            }
+            let mut bit = n >> 1;
+            while j & bit != 0 {
+                j ^= bit;
+                bit >>= 1;
+            }
+            j ^= bit;
+        }
+        let mut len = 2;
+        while len <= n {
+            let half = len / 2;
+            let angle = -2.0 * std::f32::consts::PI / (len as f32);
+            let w_step = (angle.cos(), angle.sin());
+            for i in (0..n).step_by(len) {
+                let mut w = (1.0f32, 0.0f32);
+                for k in 0..half {
+                    let u = buf[i + k];
+                    let v = (
+                        buf[i + k + half].0 * w.0 - buf[i + k + half].1 * w.1,
+                        buf[i + k + half].0 * w.1 + buf[i + k + half].1 * w.0,
+                    );
+                    buf[i + k] = (u.0 + v.0, u.1 + v.1);
+                    buf[i + k + half] = (u.0 - v.0, u.1 - v.1);
+                    w = (w.0 * w_step.0 - w.1 * w_step.1, w.0 * w_step.1 + w.1 * w_step.0);
+                }
+            }
+            len <<= 1;
+        }
     }
 
     pub fn start_audio_meter(app: tauri::AppHandle) {
@@ -387,34 +469,91 @@ mod imp {
         use std::time::Duration;
         use tauri::Emitter;
         use tauri::Manager;
+        use windows::Win32::Media::Audio::{
+            IAudioClient, IAudioCaptureClient, AUDCLNT_SHAREMODE_SHARED, WAVEFORMATEX,
+        };
+
+        const AUDCLNT_STREAMFLAGS_LOOPBACK: u32 = 0x00020000;
+        const AUDCLNT_BUFFERFLAGS_SILENT: u32 = 0x2;
 
         std::thread::Builder::new()
-            .name("audio-meter".into())
+            .name("audio-loopback-fft".into())
             .spawn(move || {
                 com_init();
-                let mut last_emit_peak = 0.0f32;
+
+                let mut pcm_ring = [0.0f32; 512];
+                let mut ring_idx = 0usize;
+                let mut smooth_bins = [0.0f32; 32];
+                let mut windowed = [(0.0f32, 0.0f32); 512];
+                let mut client_opt: Option<(IAudioClient, IAudioCaptureClient, u16, u16)> = None;
+                let mut stale_counter = 0u32;
+
+                // 32 Logarithmic frequency band boundaries across 256 positive FFT bins
+                const BAND_BOUNDS: [(usize, usize); 32] = [
+                    (1, 2),    // Band 0:  ~94 Hz (Deep Sub-bass)
+                    (2, 3),    // Band 1:  ~140 Hz (Punchy Kick drum fundamental!)
+                    (3, 4),    // Band 2:  ~187 Hz (Bass note fundamental)
+                    (4, 5),    // Band 3:  ~234 Hz
+                    (5, 6),    // Band 4:  ~281 Hz
+                    (6, 7),    // Band 5:  ~328 Hz
+                    (7, 8),    // Band 6:  ~375 Hz
+                    (8, 10),   // Band 7:  ~375-468 Hz
+                    (10, 12),  // Band 8:  ~468-562 Hz
+                    (12, 14),  // Band 9:  ~562-656 Hz
+                    (14, 17),  // Band 10: ~656-796 Hz
+                    (17, 20),  // Band 11: ~796-937 Hz
+                    (20, 24),  // Band 12: ~937-1125 Hz (Vocal range)
+                    (24, 28),  // Band 13: ~1.1-1.3 kHz
+                    (28, 33),  // Band 14: ~1.3-1.5 kHz
+                    (33, 39),  // Band 15: ~1.5-1.8 kHz
+                    (39, 45),  // Band 16: ~1.8-2.1 kHz
+                    (45, 52),  // Band 17: ~2.1-2.4 kHz
+                    (52, 60),  // Band 18: ~2.4-2.8 kHz
+                    (60, 69),  // Band 19: ~2.8-3.2 kHz
+                    (69, 79),  // Band 20: ~3.2-3.7 kHz (Snare attack)
+                    (79, 90),  // Band 21: ~3.7-4.2 kHz
+                    (90, 103), // Band 22: ~4.2-4.8 kHz
+                    (103, 117),// Band 23: ~4.8-5.5 kHz
+                    (117, 133),// Band 24: ~5.5-6.2 kHz
+                    (133, 151),// Band 25: ~6.2-7.1 kHz
+                    (151, 171),// Band 26: ~7.1-8.0 kHz
+                    (171, 193),// Band 27: ~8.0-9.0 kHz (Hi-hats, cymbals)
+                    (193, 217),// Band 28: ~9.0-10.2 kHz
+                    (217, 230),// Band 29: ~10.2-10.8 kHz
+                    (230, 243),// Band 30: ~10.8-11.4 kHz
+                    (243, 256),// Band 31: ~11.4-12.0 kHz (Brilliance/Air)
+                ];
 
                 loop {
-                    let mut peak: f32 = 0.0;
-                    unsafe {
-                        let enumr_res: windows::core::Result<IMMDeviceEnumerator> =
-                            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL);
-                        if let Ok(enumr) = enumr_res {
-                            // 1. Primary: eMultimedia (Chrome, Spotify, Edge, YouTube media role)
-                            if let Ok(dev) = enumr.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-                                if let Ok(m) = dev.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None) {
-                                    if let Ok(p) = m.GetPeakValue() {
-                                        peak = p;
-                                    }
-                                }
-                            }
-                            // 2. Fallback: eConsole (system default device)
-                            if peak < 0.003 {
-                                if let Ok(dev) = enumr.GetDefaultAudioEndpoint(eRender, eConsole) {
-                                    if let Ok(m) = dev.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None) {
-                                        if let Ok(p) = m.GetPeakValue() {
-                                            if p > peak {
-                                                peak = p;
+                    // 1. Maintain active WASAPI Loopback client on current default audio device
+                    if client_opt.is_none() {
+                        unsafe {
+                            let enumr_res: windows::core::Result<IMMDeviceEnumerator> =
+                                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL);
+                            if let Ok(enumr) = enumr_res {
+                                let dev = enumr.GetDefaultAudioEndpoint(eRender, eMultimedia)
+                                    .or_else(|_| enumr.GetDefaultAudioEndpoint(eRender, eConsole));
+                                if let Ok(dev) = dev {
+                                    if let Ok(client) = dev.Activate::<IAudioClient>(CLSCTX_ALL, None) {
+                                        if let Ok(pwfx) = client.GetMixFormat() {
+                                            let channels = (*pwfx).nChannels;
+                                            let bits = (*pwfx).wBitsPerSample;
+                                            let hr = client.Initialize(
+                                                AUDCLNT_SHAREMODE_SHARED,
+                                                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                                1_000_000,
+                                                0,
+                                                pwfx,
+                                                None,
+                                            );
+                                            CoTaskMemFree(Some(pwfx as *const _));
+                                            if hr.is_ok() {
+                                                if let Ok(capture) = client.GetService::<IAudioCaptureClient>() {
+                                                    if client.Start().is_ok() {
+                                                        client_opt = Some((client, capture, channels, bits));
+                                                        stale_counter = 0;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -423,14 +562,140 @@ mod imp {
                         }
                     }
 
-                    AUDIO_PEAK.store(peak.to_bits(), Ordering::Relaxed);
+                    // 2. Read PCM sample frames from loopback buffer
+                    let mut frames_read = 0usize;
+                    if let Some((_, capture, channels, bits)) = &client_opt {
+                        let channels = *channels as usize;
+                        let bits = *bits;
+                        unsafe {
+                            let mut p_data: *mut u8 = std::ptr::null_mut();
+                            let mut num_frames: u32 = 0;
+                            let mut flags: u32 = 0;
 
-                    if peak > 0.003 || last_emit_peak > 0.003 {
-                        let _ = app.emit("audio-peak", peak);
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.emit("audio-peak", peak);
+                            while capture.GetBuffer(&mut p_data, &mut num_frames, &mut flags, None, None).is_ok() {
+                                if num_frames == 0 {
+                                    break;
+                                }
+                                if !p_data.is_null() && (flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0 {
+                                    if bits == 32 {
+                                        let samples = std::slice::from_raw_parts(p_data as *const f32, num_frames as usize * channels);
+                                        for frame in 0..num_frames as usize {
+                                            let mut sum = 0.0f32;
+                                            for ch in 0..channels {
+                                                sum += samples[frame * channels + ch];
+                                            }
+                                            pcm_ring[ring_idx] = sum / channels as f32;
+                                            ring_idx = (ring_idx + 1) % 512;
+                                            frames_read += 1;
+                                        }
+                                    } else if bits == 16 {
+                                        let samples = std::slice::from_raw_parts(p_data as *const i16, num_frames as usize * channels);
+                                        for frame in 0..num_frames as usize {
+                                            let mut sum = 0.0f32;
+                                            for ch in 0..channels {
+                                                sum += samples[frame * channels + ch] as f32;
+                                            }
+                                            pcm_ring[ring_idx] = sum / (channels as f32 * 32768.0);
+                                            ring_idx = (ring_idx + 1) % 512;
+                                            frames_read += 1;
+                                        }
+                                    }
+                                }
+                                let _ = capture.ReleaseBuffer(num_frames);
+                            }
                         }
-                        last_emit_peak = peak;
+                    }
+
+                    if frames_read == 0 {
+                        stale_counter += 1;
+                        if stale_counter > 100 {
+                            // Device may have changed or gone to sleep — refresh loopback
+                            client_opt = None;
+                            stale_counter = 0;
+                        }
+                    } else {
+                        stale_counter = 0;
+                    }
+
+                    // 3. Compute Hann Window, RMS amplitude and FFT
+                    let mut rms_sum = 0.0f32;
+                    let mut peak_val = 0.0f32;
+                    for i in 0..512 {
+                        let s = pcm_ring[(ring_idx + i) % 512];
+                        rms_sum += s * s;
+                        let abs_s = s.abs();
+                        if abs_s > peak_val {
+                            peak_val = abs_s;
+                        }
+                        // Hann window to minimize spectral leakage
+                        let w = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / 512.0).cos());
+                        windowed[i] = (s * w, 0.0);
+                    }
+                    let rms = (rms_sum / 512.0).sqrt();
+
+                    // Run in-place Radix-2 FFT
+                    fft_radix2(&mut windowed);
+
+                    // Compute magnitudes across positive frequency bins 0..256
+                    let mut mags = [0.0f32; 256];
+                    for k in 0..256 {
+                        mags[k] = (windowed[k].0 * windowed[k].0 + windowed[k].1 * windowed[k].1).sqrt() / 128.0;
+                    }
+
+                    // Map 256 frequency bins into 32 perceptual logarithmic bands
+                    let mut raw_bins = [0.0f32; 32];
+                    for b in 0..32 {
+                        let (start, end) = BAND_BOUNDS[b];
+                        let mut sum = 0.0f32;
+                        for k in start..end {
+                            sum += mags[k];
+                        }
+                        let count = (end - start).max(1) as f32;
+                        let weight = if b < 4 { 2.6 } else if b < 12 { 1.9 } else { 1.4 };
+                        raw_bins[b] = (sum / count * weight).min(1.0);
+                    }
+
+                    // Dynamic smoothing: instant explosive attack, smooth musical decay
+                    for b in 0..32 {
+                        let target = raw_bins[b];
+                        let cur = smooth_bins[b];
+                        if target > cur {
+                            smooth_bins[b] = cur + (target - cur) * 0.88;
+                        } else {
+                            smooth_bins[b] = cur * 0.82;
+                        }
+                    }
+
+                    // Calculate genuine composite frequency energies
+                    let bass = ((smooth_bins[0] + smooth_bins[1] + smooth_bins[2] + smooth_bins[3] + smooth_bins[4]) / 5.0).min(1.0);
+                    let mid = (smooth_bins[5..19].iter().sum::<f32>() / 14.0).min(1.0);
+                    let treble = (smooth_bins[19..32].iter().sum::<f32>() / 13.0).min(1.0);
+                    let is_active = rms > 0.0008 || peak_val > 0.002;
+
+                    // Update atomic peak
+                    let eff_peak = peak_val.max(bass * 0.95);
+                    AUDIO_PEAK.store(eff_peak.to_bits(), Ordering::Relaxed);
+
+                    // Update global spectrum store
+                    let spec = AudioSpectrum {
+                        bins: smooth_bins.to_vec(),
+                        bass,
+                        mid,
+                        treble,
+                        volume: rms.min(1.0),
+                        is_active,
+                    };
+
+                    if let Ok(mut guard) = spectrum_store().lock() {
+                        *guard = spec.clone();
+                    }
+
+                    // Emit to frontend listeners
+                    let _ = app.emit("audio-spectrum", &spec);
+                    let _ = app.emit("audio-peak", eff_peak);
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.emit("audio-spectrum", &spec);
+                        let _ = w.emit("audio-peak", eff_peak);
                     }
 
                     std::thread::sleep(Duration::from_millis(20));
@@ -467,6 +732,10 @@ pub fn get_audio_peak() -> f32 {
     imp::get_audio_peak()
 }
 #[cfg(target_os = "windows")]
+pub fn get_audio_spectrum() -> AudioSpectrum {
+    imp::get_audio_spectrum()
+}
+#[cfg(target_os = "windows")]
 pub fn start_audio_meter(app: tauri::AppHandle) {
     imp::start_audio_meter(app);
 }
@@ -494,6 +763,17 @@ pub fn set_session_mute(_id: &str, _muted: bool) -> bool {
 #[cfg(not(target_os = "windows"))]
 pub fn get_audio_peak() -> f32 {
     0.0
+}
+#[cfg(not(target_os = "windows"))]
+pub fn get_audio_spectrum() -> AudioSpectrum {
+    AudioSpectrum {
+        bins: vec![0.0; 32],
+        bass: 0.0,
+        mid: 0.0,
+        treble: 0.0,
+        volume: 0.0,
+        is_active: false,
+    }
 }
 #[cfg(not(target_os = "windows"))]
 pub fn start_audio_meter(_app: tauri::AppHandle) {}

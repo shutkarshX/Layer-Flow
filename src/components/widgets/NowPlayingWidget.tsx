@@ -148,8 +148,8 @@ function cleanTrackTitle(rawTitle: string, rawArtist?: string): { title: string;
 
   // Detect podcast indicators
   const isLikelyPodcast =
-    /\b(podcast|episode|ep\.?\s*\d+|#\d{2,}|interview|talk|audiobook)\b/i.test(title) ||
-    /\b(podcast|shows?)\b/i.test(artist)
+    /podcast|episode|interview|audiobook|#\d{2,}/i.test(title) ||
+    /podcast|shows?/i.test(artist)
 
   // Strip YouTube suffixes & metadata noise
   const pipeIdx = title.indexOf('|')
@@ -1483,9 +1483,19 @@ function SubwooferHaloArtwork({
         coneRef.current.style.transform = `scale(${coneScale.toFixed(4)})`
       }
 
-      // Trigger shockwave ring on new beat downbeat
-      if (playing && currentBeatInt !== prevBeatInt) {
-        prevBeatInt = currentBeatInt
+      // Transient physical kick detection from hardware audio
+      const prevHaloBass = (window as any).__lastHaloBass || 0
+      const haloBassDelta = realBass - prevHaloBass
+      ;(window as any).__lastHaloBass = realBass
+      const isTransientKick = isLiveSpectrum && (realBass > 0.20 && haloBassDelta > 0.07)
+
+      // Trigger shockwave: instant physical transient on live audio, BPM downbeat on fallback
+      const shouldTriggerShockwave = isLiveSpectrum
+        ? isTransientKick
+        : (playing && currentBeatInt !== prevBeatInt)
+
+      if (playing && shouldTriggerShockwave) {
+        if (!isLiveSpectrum) prevBeatInt = currentBeatInt
         shockwaves.push({ radius: Math.min(w, h) * 0.28, alpha: 0.95 })
         if (shockwaves.length > 6) shockwaves.shift()
       }
@@ -1522,20 +1532,26 @@ function SubwooferHaloArtwork({
         const angle = norm * Math.PI * 2 - Math.PI / 2
 
         // Symmetrical audio distribution: bass at top/bottom, mids & treble around sides
-        const distFromPole = Math.abs(Math.sin(angle))
-        const bassPart = (1 - distFromPole) * (kick * 0.92 + 0.1)
-        const midPart = distFromPole * (snare * 0.78 + 0.14)
-        const treblePart = Math.pow(distFromPole, 1.8) * (hat * 0.65 + 0.08)
-        const harm = Math.sin(localPos * 7.2 + i * 0.6) * 0.1
-
-        const targetAmp = (playing || isLiveHardware) ? Math.min(1.0, Math.max(0.06, (bassPart + midPart + treblePart + harm) * (isLiveHardware ? rayEnergy : 1))) : 0.04
+        const realBins = isLiveSpectrum ? spec?.bins : null
+        let targetAmp = 0.04
+        if (isLiveSpectrum && realBins && realBins.length === 32) {
+          const binIdx = Math.floor(Math.abs(Math.sin(angle)) * 31)
+          targetAmp = Math.min(1.0, Math.max(0.06, (realBins[binIdx] || 0) * 1.25))
+        } else {
+          const distFromPole = Math.abs(Math.sin(angle))
+          const bassPart = (1 - distFromPole) * (kick * 0.92 + 0.1)
+          const midPart = distFromPole * (snare * 0.78 + 0.14)
+          const treblePart = Math.pow(distFromPole, 1.8) * (hat * 0.65 + 0.08)
+          const harm = Math.sin(localPos * 7.2 + i * 0.6) * 0.1
+          targetAmp = (playing || isLiveHardware) ? Math.min(1.0, Math.max(0.06, (bassPart + midPart + treblePart + harm) * (isLiveHardware ? rayEnergy : 1))) : 0.04
+        }
         const targetLen = Math.max(2.5, targetAmp * maxRayLen)
 
         const cur = smoothRays[i] || 0
         if (targetLen > cur) {
-          smoothRays[i] = cur + (targetLen - cur) * 0.8
+          smoothRays[i] = cur + (targetLen - cur) * 0.92
         } else {
-          smoothRays[i] = cur * (playing ? 0.83 : 0.7)
+          smoothRays[i] = cur * (playing ? 0.82 : 0.7)
         }
 
         const barLen = smoothRays[i] || 2.5
@@ -2311,9 +2327,9 @@ function VisualizerCanvas({
         const targetH = rawAmp * (h - 4)
         const cur = smoothRef.current[i] ?? 0
         if (targetH > cur) {
-          smoothRef.current[i] = cur + (targetH - cur) * 0.88 // explosive attack
+          smoothRef.current[i] = cur + (targetH - cur) * 0.95 // Instant transient attack on beat drop!
         } else {
-          smoothRef.current[i] = cur * (playing ? 0.82 : 0.7) // natural musical decay
+          smoothRef.current[i] = cur * (playing ? 0.84 : 0.7) // Natural musical decay
         }
 
         const curVal = smoothRef.current[i] ?? 0
@@ -2333,19 +2349,25 @@ function VisualizerCanvas({
         const barW = 3
         const gap = 2
         const n = Math.floor(w / (barW + gap))
-        const amp = playing ? (isHardware ? Math.min(1.0, 0.12 + realBass * 0.88) : 0.95) : 0.08
-        const t = localPos * 4.2
-
         ctx.fillStyle = baseColor
 
         for (let i = 0; i < n; i++) {
           const x = i * (barW + gap)
           const p = i / n
-          const v =
-            Math.sin(p * 7 + t) * 0.5 +
-            Math.sin(p * 13 - t * 1.4) * 0.3 +
-            Math.sin(p * 23 + t * 0.7) * 0.2
-          const hh = Math.max(1.5, Math.abs(v) * h * 0.46 * amp + (kick > 0.3 ? kick * 3.5 : 1))
+          let hh = 1.5
+          if (isHardware && realBins) {
+            const binIdx = Math.floor(Math.abs(p * 2 - 1) * (BIN_COUNT - 1))
+            const v = (smoothRef.current[binIdx] || 0) / (h - 4)
+            hh = Math.max(1.5, v * h * 0.48 + (kick > 0.25 ? kick * 2.5 : 0))
+          } else {
+            const t = localPos * 4.2
+            const amp = playing ? 0.95 : 0.08
+            const v =
+              Math.sin(p * 7 + t) * 0.5 +
+              Math.sin(p * 13 - t * 1.4) * 0.3 +
+              Math.sin(p * 23 + t * 0.7) * 0.2
+            hh = Math.max(1.5, Math.abs(v) * h * 0.46 * amp + (kick > 0.3 ? kick * 3.5 : 1))
+          }
 
           ctx.beginPath()
           ctx.roundRect(x, mid - hh, barW, hh * 2, 1.5)
@@ -3088,6 +3110,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
   const [discoveredThumb, setDiscoveredThumb] = useState<string | null>(null)
   const lastSeekTimeRef = useRef<number>(0)
   const liveAudioPeakRef = useRef<number>(0)
+  const lastAudioEventTimeRef = useRef<number>(0)
   const liveSpectrumRef = useRef<AudioSpectrum>({
     bins: new Array(32).fill(0),
     bass: 0,
@@ -3152,6 +3175,8 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     listen<AudioSpectrum>('audio-spectrum', (e) => {
       if (e.payload) {
         liveSpectrumRef.current = e.payload
+        liveAudioPeakRef.current = e.payload.peak ?? e.payload.bass ?? e.payload.volume ?? 0
+        lastAudioEventTimeRef.current = performance.now()
       }
     })
       .then((un) => {
@@ -3159,17 +3184,18 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
       })
       .catch(() => {})
 
-    // Direct atomic spectrum poller (50 FPS, 20ms) directly reads Rust WASAPI FFT engine via IPC
+    // Fallback poller only if push events pause (zero overhead during normal playback)
     const pollInterval = setInterval(() => {
+      if (performance.now() - lastAudioEventTimeRef.current < 150) return
       getAudioSpectrum()
         .then((spec) => {
           if (spec && Array.isArray(spec.bins)) {
             liveSpectrumRef.current = spec
-            liveAudioPeakRef.current = spec.volume
+            liveAudioPeakRef.current = spec.peak ?? spec.bass ?? spec.volume ?? 0
           }
         })
         .catch(() => {})
-    }, 20)
+    }, 50)
 
     return () => {
       if (unlistenPeak) unlistenPeak()

@@ -57,9 +57,10 @@ function looksLikeJson(t: string): boolean {
 }
 
 function looksLikeSql(t: string): boolean {
+  const s = t.trimStart()
   return (
-    /^\s*(select|insert\s+into|update|delete\s+from|create\s+(table|database|index|view)|alter\s+table|drop\s+(table|database)|with)\b/i.test(
-      t,
+    /^(select|insert\s+into|update|delete\s+from|create\s+(table|database|index|view)|alter\s+table|drop\s+(table|database)|with)\b/i.test(
+      s,
     ) && /\b(from|into|set|values|where|table|join)\b/i.test(t)
   )
 }

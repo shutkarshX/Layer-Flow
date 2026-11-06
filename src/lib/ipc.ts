@@ -105,6 +105,7 @@ export interface AudioSpectrum {
   mid: number
   treble: number
   volume: number
+  peak?: number
   isActive: boolean
 }
 

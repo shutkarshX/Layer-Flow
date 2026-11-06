@@ -12,6 +12,7 @@ import {
   mediaSeek,
   mediaRepeat,
   setVolume,
+  getAudioPeak,
   type NowPlaying,
 } from '../../lib/ipc'
 import type {
@@ -2172,6 +2173,7 @@ function VisualizerCanvas({
   const smoothRef = useRef<number[]>([])
   const needleRef = useRef<number>(0)
   const pulseRingsRef = useRef<{ radius: number; alpha: number }[]>([])
+  const maxPeakRef = useRef<number>(0.15)
   const smoothPeakRef = useRef<number>(0)
   const prevPeakRef = useRef<number>(0)
   const posRef = useRef(playbackPos)
@@ -2232,23 +2234,36 @@ function VisualizerCanvas({
 
       const baseColor = getSafeCanvasColor(color)
 
-      // ── Real Hardware Audio Peak Reactivity ──
+      // ── Real Hardware Audio Peak Reactivity with Automatic Gain Control (AGC) ──
       const rawPeak = liveAudioPeakRef?.current || 0
-      const isHardware = rawPeak > 0.005
+      const isHardware = rawPeak > 0.003
 
-      // Instantaneous attack on audio rise, smooth natural decay on fall
-      let smoothPeak = smoothPeakRef.current
-      if (rawPeak > smoothPeak) {
-        smoothPeak += (rawPeak - smoothPeak) * 0.85
+      // Dynamic automatic gain adaptation (works at 10% volume, 50% volume, or 100% volume)
+      let maxPeak = maxPeakRef.current
+      if (rawPeak > maxPeak) {
+        maxPeak = Math.min(1.0, rawPeak)
       } else {
-        smoothPeak += (rawPeak - smoothPeak) * 0.16
+        // Slow natural decay over ~3.5 seconds
+        maxPeak = Math.max(0.06, maxPeak * 0.995)
+      }
+      maxPeakRef.current = maxPeak
+
+      // Normalized peak scaled against recent local maximum (0.0 to 1.0)
+      const normalizedPeak = isHardware ? Math.min(1.0, rawPeak / Math.max(0.05, maxPeak)) : 0
+
+      // Instantaneous attack on beat rise, smooth release on decay
+      let smoothPeak = smoothPeakRef.current
+      if (normalizedPeak > smoothPeak) {
+        smoothPeak += (normalizedPeak - smoothPeak) * 0.90 // ultra-punchy attack
+      } else {
+        smoothPeak += (normalizedPeak - smoothPeak) * 0.20 // natural musical release
       }
       smoothPeakRef.current = smoothPeak
 
-      // Transient bass kick detection from physical audio stream
-      const peakDelta = rawPeak - prevPeakRef.current
-      const isTransient = rawPeak > 0.22 && peakDelta > 0.12
-      prevPeakRef.current = rawPeak
+      // Transient bass kick detection: rapid surge in energy
+      const peakDelta = normalizedPeak - prevPeakRef.current
+      const isTransient = normalizedPeak > 0.35 && peakDelta > 0.14
+      prevPeakRef.current = normalizedPeak
 
       // ── High Dynamic Range Beat & Rhythm Engine ──
       const beatSec = 60 / bpm
@@ -2259,7 +2274,7 @@ function VisualizerCanvas({
       // Fallback synthetic kick vs real hardware audio kick
       const synthKick = playing ? Math.pow(Math.max(0, 1 - beatPhase * 3.4), 2.2) : 0
       const kick = isHardware
-        ? Math.min(1.0, Math.pow(smoothPeak * 1.35, 1.4) + (isTransient ? 0.35 : 0))
+        ? Math.min(1.0, Math.pow(smoothPeak, 1.2) * 1.1 + (isTransient ? 0.35 : 0))
         : synthKick
 
       // Spawn expanding shockwave ring on physical bass kick
@@ -2286,7 +2301,7 @@ function VisualizerCanvas({
       for (let i = 0; i < BIN_COUNT; i++) {
         const norm = i / BIN_COUNT
         // Sub-bass & kick (bins 0-7)
-        const bass = Math.max(0, 1 - norm * 2.8) * (kick * 1.1 + (isHardware ? smoothPeak * 0.35 : 0.06))
+        const bass = Math.max(0, 1 - norm * 2.8) * (kick * 1.25 + (isHardware ? smoothPeak * 0.45 : 0.06))
         // Mid-range vocal & snare (bins 8-20)
         const midDist = Math.abs(norm - 0.44) * 2.6
         const mid = Math.max(0, 1 - midDist) * (snare * 0.85 + 0.10)
@@ -2302,7 +2317,7 @@ function VisualizerCanvas({
 
         const cur = smoothRef.current[i] ?? 0
         if (targetH > cur) {
-          smoothRef.current[i] = cur + (targetH - cur) * 0.8 // explosive attack
+          smoothRef.current[i] = cur + (targetH - cur) * 0.85 // explosive attack
         } else {
           smoothRef.current[i] = cur * (playing ? 0.83 : 0.7) // natural decay
         }
@@ -2378,27 +2393,30 @@ function VisualizerCanvas({
       // ─────────────────────────────────────────────────────────────
       else if (type === 'wave') {
         const points: { x: number; y: number }[] = []
-        // Effective energy: when hardware audio is active, smoothly scales with real audio peak!
-        // Quiet dialogue: smoothPeak ~ 0.06 -> amp ~ h * 0.10 (subtle resting wave)
-        // Heavy bass drops: smoothPeak ~ 0.80 -> amp ~ h * 0.54 (soaring explosive wave)
-        const effectiveEnergy = isHardware
-          ? Math.min(1.0, smoothPeak * 1.35)
-          : (playing ? 0.35 + kick * 0.45 : 0.04)
-
-        const amp = playing ? h * (0.06 + effectiveEnergy * 0.48) : h * 0.04
+        // Dynamic amplitude:
+        // Quiet / Speech: amp is ~h * 0.08 (subtle, calm line)
+        // Bass Drop / Kick: amp expands to ~h * 0.52 (soaring, physical bass pulse)
+        // Paused: h * 0.04
+        const energy = isHardware ? smoothPeak : (playing ? 0.35 + kick * 0.45 : 0.04)
+        const amp = playing ? h * (0.07 + energy * 0.46) : h * 0.04
         const step = Math.max(3, Math.floor(w / 70))
 
-        // Center subwoofer bass kick deflection
-        const centerDeflection = kick > 0.22 ? (kick - 0.22) * h * 0.32 : 0
+        // Center subwoofer excursion punch
+        const centerExcursion = kick > 0.18 ? (kick - 0.18) * h * 0.35 : 0
+
+        // Continuous phase rolling with sound
+        const phase = localPos * 4.0
 
         for (let x = 0; x <= w; x += step) {
           const normX = (x / w) * Math.PI * 4
           const centerWeight = Math.sin((x / w) * Math.PI)
+          // Bi-directional symmetrical excursion: bounces UP and DOWN on kick hits!
+          const kickBounce = Math.sin(normX * 2.0) * centerWeight * centerExcursion
           const y =
             h / 2 +
-            Math.sin(normX + localPos * (bpm / 60) * 3.14) * amp * 0.7 +
-            Math.cos(normX * 2.2 - localPos * 4.2) * amp * 0.3 -
-            centerWeight * centerDeflection
+            Math.sin(normX + phase) * amp * 0.65 +
+            Math.cos(normX * 2.2 - phase * 0.8) * amp * 0.35 +
+            kickBounce
           points.push({ x, y })
         }
 
@@ -2415,7 +2433,7 @@ function VisualizerCanvas({
           ctx.lineTo(w, h)
           ctx.closePath()
 
-          const fillAlpha = Math.min(0.42, 0.06 + effectiveEnergy * 0.32)
+          const fillAlpha = Math.min(0.48, 0.06 + energy * 0.38)
           const fillGrad = ctx.createLinearGradient(0, 0, 0, h)
           safeAddColorStop(fillGrad, 0, `rgba(56, 189, 248, ${fillAlpha.toFixed(2)})`, 'transparent')
           safeAddColorStop(fillGrad, 1, 'rgba(56, 189, 248, 0.01)', 'transparent')
@@ -2428,7 +2446,7 @@ function VisualizerCanvas({
         ctx.lineWidth = 2.4
         ctx.strokeStyle = '#ffffff'
         ctx.shadowColor = baseColor
-        ctx.shadowBlur = playing ? Math.floor(4 + effectiveEnergy * 18) : 2
+        ctx.shadowBlur = playing ? Math.floor(4 + energy * 22) : 2
 
         if (firstPt) {
           ctx.moveTo(firstPt.x, firstPt.y)
@@ -3115,7 +3133,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     updateWallpaper()
   }, [])
 
-  // Real-time Hardware Audio Peak Listener
+  // Real-time Hardware Audio Peak Listener & direct atomic poller
   useEffect(() => {
     if (!isTauri()) return
     let unlisten: (() => void) | null = null
@@ -3126,8 +3144,21 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
         unlisten = un
       })
       .catch(() => {})
+
+    // Direct atomic poller (40 FPS, 25ms) reads Rust atomic memory directly via IPC
+    const pollInterval = setInterval(() => {
+      getAudioPeak()
+        .then((val) => {
+          if (typeof val === 'number') {
+            liveAudioPeakRef.current = val
+          }
+        })
+        .catch(() => {})
+    }, 25)
+
     return () => {
       if (unlisten) unlisten()
+      clearInterval(pollInterval)
     }
   }, [])
 

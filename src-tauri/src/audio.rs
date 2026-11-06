@@ -32,7 +32,7 @@ mod imp {
     use windows::core::{Interface, GUID, HRESULT, PCWSTR};
     use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
     use windows::Win32::Media::Audio::{
-        eCapture, eConsole, eRender, EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator,
+        eCapture, eConsole, eMultimedia, eRender, EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator,
         DEVICE_STATE_ACTIVE,
     };
     use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
@@ -386,56 +386,54 @@ mod imp {
         use std::sync::atomic::Ordering;
         use std::time::Duration;
         use tauri::Emitter;
+        use tauri::Manager;
 
         std::thread::Builder::new()
             .name("audio-meter".into())
             .spawn(move || {
                 com_init();
-                let mut meter_opt: Option<IAudioMeterInformation> = None;
                 let mut last_emit_peak = 0.0f32;
 
                 loop {
-                    if meter_opt.is_none() {
-                        unsafe {
-                            let enumr_res: windows::core::Result<IMMDeviceEnumerator> =
-                                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL);
-                            if let Ok(enumr) = enumr_res {
+                    let mut peak: f32 = 0.0;
+                    unsafe {
+                        let enumr_res: windows::core::Result<IMMDeviceEnumerator> =
+                            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL);
+                        if let Ok(enumr) = enumr_res {
+                            // 1. Primary: eMultimedia (Chrome, Spotify, Edge, YouTube media role)
+                            if let Ok(dev) = enumr.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+                                if let Ok(m) = dev.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None) {
+                                    if let Ok(p) = m.GetPeakValue() {
+                                        peak = p;
+                                    }
+                                }
+                            }
+                            // 2. Fallback: eConsole (system default device)
+                            if peak < 0.003 {
                                 if let Ok(dev) = enumr.GetDefaultAudioEndpoint(eRender, eConsole) {
                                     if let Ok(m) = dev.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None) {
-                                        meter_opt = Some(m);
+                                        if let Ok(p) = m.GetPeakValue() {
+                                            if p > peak {
+                                                peak = p;
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                        if meter_opt.is_none() {
-                            std::thread::sleep(Duration::from_millis(500));
-                            continue;
-                        }
                     }
-
-                    let peak: f32 = if let Some(m) = &meter_opt {
-                        unsafe {
-                            match m.GetPeakValue() {
-                                Ok(p) => p,
-                                Err(_) => {
-                                    meter_opt = None;
-                                    std::thread::sleep(Duration::from_millis(200));
-                                    continue;
-                                }
-                            }
-                        }
-                    } else {
-                        0.0
-                    };
 
                     AUDIO_PEAK.store(peak.to_bits(), Ordering::Relaxed);
 
-                    if peak > 0.005 || last_emit_peak > 0.005 {
+                    if peak > 0.003 || last_emit_peak > 0.003 {
                         let _ = app.emit("audio-peak", peak);
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.emit("audio-peak", peak);
+                        }
                         last_emit_peak = peak;
                     }
 
-                    std::thread::sleep(Duration::from_millis(28));
+                    std::thread::sleep(Duration::from_millis(20));
                 }
             })
             .ok();

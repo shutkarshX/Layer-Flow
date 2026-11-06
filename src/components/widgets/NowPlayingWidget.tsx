@@ -3222,7 +3222,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
           const dur = session?.duration || 0
           const current = dur > 0 ? Math.min(dur, pos + elapsed) : pos + elapsed
           setLivePos(current)
-          if (isLooping && dur > 0 && current >= dur - 0.35) {
+          if (isLooping && dur > 2 && current >= dur - 0.85) {
             handleSeek(0)
           }
         }
@@ -3458,6 +3458,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     e.stopPropagation()
     if (isTauri()) {
       mediaControl('playpause').catch(() => {})
+      setSession((prev) => (prev ? { ...prev, playing: !prev.playing } : null))
     } else {
       setIsPlaying((prev) => !prev)
       setSession((prev) => (prev ? { ...prev, playing: !prev.playing } : null))

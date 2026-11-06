@@ -907,8 +907,12 @@ fn media_thread(
         // following snapshot skip the slower art read so playback stays snappy.
         let mut did_cmd = skip_thumb_next;
         skip_thumb_next = false;
+        let (src, is_playing) = np
+            .lock()
+            .map(|g| (g.source.clone(), g.playing))
+            .unwrap_or_default();
         while let Ok(cmd) = rx.try_recv() {
-            apply(m, cmd);
+            apply(m, cmd, &src, is_playing);
             did_cmd = true;
         }
         match read_session(m, &mut thumb_cache, did_cmd) {
@@ -933,7 +937,11 @@ fn media_thread(
         match rx.recv_timeout(Duration::from_millis(800)) {
             Ok(cmd) => {
                 if let Some(m2) = mgr.as_ref() {
-                    apply(m2, cmd);
+                    let (src, is_playing) = np
+                        .lock()
+                        .map(|g| (g.source.clone(), g.playing))
+                        .unwrap_or_default();
+                    apply(m2, cmd, &src, is_playing);
                     skip_thumb_next = true;
                 }
             }
@@ -1066,40 +1074,94 @@ fn read_thumb(
 fn apply(
     mgr: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager,
     cmd: Cmd,
+    current_source: &str,
+    is_currently_playing: bool,
 ) {
-    let session = match mgr.GetCurrentSession() {
-        Ok(s) => s,
-        Err(_) => {
-            if let Ok(list) = mgr.GetSessions() {
-                if let Ok(s) = list.GetAt(0) {
-                    s
-                } else {
-                    return;
-                }
-            } else {
-                return;
+    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status;
+
+    let session = (|| {
+        let list = mgr.GetSessions().ok()?;
+        let sessions: Vec<_> = (&list).into_iter().collect();
+
+        // 1. Prefer session that is currently Playing
+        if let Some(s) = sessions.iter().find(|s| {
+            s.GetPlaybackInfo()
+                .and_then(|i| i.PlaybackStatus())
+                .map(|st| st == Status::Playing)
+                .unwrap_or(false)
+        }) {
+            return Some(s.clone());
+        }
+
+        // 2. Prefer session matching current widget source (e.g. Chrome, Spotify)
+        if !current_source.is_empty() {
+            if let Some(s) = sessions.iter().find(|s| {
+                s.SourceAppUserModelId()
+                    .map(|id| id.to_string().eq_ignore_ascii_case(current_source))
+                    .unwrap_or(false)
+            }) {
+                return Some(s.clone());
             }
         }
-    };
-    let op = match cmd {
-        Cmd::Next => session.TrySkipNextAsync(),
-        Cmd::Prev => session.TrySkipPreviousAsync(),
-        Cmd::Toggle => session.TryTogglePlayPauseAsync(),
-        Cmd::Seek(sec) => {
-            let ticks = (sec.max(0.0) * 10_000_000.0) as i64;
-            session.TryChangePlaybackPositionAsync(ticks)
+
+        // 3. Fallback to OS current session
+        if let Ok(s) = mgr.GetCurrentSession() {
+            return Some(s);
         }
-        Cmd::Loop(repeat) => {
-            let mode = if repeat {
-                windows::Media::MediaPlaybackAutoRepeatMode::Track
-            } else {
-                windows::Media::MediaPlaybackAutoRepeatMode::None
-            };
-            session.TryChangeAutoRepeatModeAsync(mode)
+
+        // 4. Fallback to first existing session
+        sessions.into_iter().next()
+    })();
+
+    let mut handled = false;
+    if let Some(s) = session.as_ref() {
+        let op = match cmd {
+            Cmd::Next => s.TrySkipNextAsync(),
+            Cmd::Prev => s.TrySkipPreviousAsync(),
+            Cmd::Toggle => {
+                if is_currently_playing {
+                    s.TryPauseAsync()
+                } else {
+                    s.TryPlayAsync()
+                }
+            }
+            Cmd::Seek(sec) => {
+                let ticks = (sec.max(0.0) * 10_000_000.0) as i64;
+                s.TryChangePlaybackPositionAsync(ticks)
+            }
+            Cmd::Loop(repeat) => {
+                let mode = if repeat {
+                    windows::Media::MediaPlaybackAutoRepeatMode::Track
+                } else {
+                    windows::Media::MediaPlaybackAutoRepeatMode::None
+                };
+                s.TryChangeAutoRepeatModeAsync(mode)
+            }
+        };
+
+        if let Ok(op) = op {
+            if let Some(ok) = await_op(op, 800) {
+                handled = ok;
+            }
         }
-    };
-    if let Ok(op) = op {
-        let _ = await_op(op, 2000);
+    }
+
+    // If SMTC command was rejected or unhandled by browser/media stream,
+    // fallback to universal Windows multimedia key dispatch.
+    if !handled {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP};
+        let vk = match cmd {
+            Cmd::Toggle => Some(0xB3u8), // VK_MEDIA_PLAY_PAUSE
+            Cmd::Next => Some(0xB0u8),   // VK_MEDIA_NEXT_TRACK
+            Cmd::Prev => Some(0xB1u8),   // VK_MEDIA_PREV_TRACK
+            _ => None,
+        };
+        if let Some(key) = vk {
+            unsafe {
+                keybd_event(key, 0, 0, 0);
+                keybd_event(key, 0, KEYEVENTF_KEYUP, 0);
+            }
+        }
     }
 }
 

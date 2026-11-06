@@ -2,7 +2,7 @@
   "name": "layer",
   "private": true,
   "license": "MIT",
-  "version": "1.11.12",
+  "version": "1.11.13",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -2155,6 +2155,7 @@ interface VisualizerCanvasProps {
   playbackPos?: number
   title?: string
   artist?: string
+  liveAudioPeakRef?: React.MutableRefObject<number>
 }
 
 function VisualizerCanvas({
@@ -2164,12 +2165,15 @@ function VisualizerCanvas({
   playbackPos = 0,
   title,
   artist,
+  liveAudioPeakRef,
 }: VisualizerCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const peaksRef = useRef<number[]>([])
   const smoothRef = useRef<number[]>([])
   const needleRef = useRef<number>(0)
   const pulseRingsRef = useRef<{ radius: number; alpha: number }[]>([])
+  const smoothPeakRef = useRef<number>(0)
+  const prevPeakRef = useRef<number>(0)
   const posRef = useRef(playbackPos)
   posRef.current = playbackPos
 
@@ -2228,46 +2232,72 @@ function VisualizerCanvas({
 
       const baseColor = getSafeCanvasColor(color)
 
+      // ── Real Hardware Audio Peak Reactivity ──
+      const rawPeak = liveAudioPeakRef?.current || 0
+      const isHardware = rawPeak > 0.005
+
+      // Instantaneous attack on audio rise, smooth natural decay on fall
+      let smoothPeak = smoothPeakRef.current
+      if (rawPeak > smoothPeak) {
+        smoothPeak += (rawPeak - smoothPeak) * 0.85
+      } else {
+        smoothPeak += (rawPeak - smoothPeak) * 0.16
+      }
+      smoothPeakRef.current = smoothPeak
+
+      // Transient bass kick detection from physical audio stream
+      const peakDelta = rawPeak - prevPeakRef.current
+      const isTransient = rawPeak > 0.22 && peakDelta > 0.12
+      prevPeakRef.current = rawPeak
+
       // ── High Dynamic Range Beat & Rhythm Engine ──
       const beatSec = 60 / bpm
       const beatProgress = localPos / beatSec
       const beatPhase = beatProgress % 1.0 // 0.0 to 1.0 on every single musical beat
       const currentBeatInt = Math.floor(beatProgress)
 
-      // Spawn expanding shockwave ring on new beat downbeat for 'pulse' or 'halo' mode
-      if (playing && currentBeatInt !== prevBeatInt) {
-        prevBeatInt = currentBeatInt
+      // Fallback synthetic kick vs real hardware audio kick
+      const synthKick = playing ? Math.pow(Math.max(0, 1 - beatPhase * 3.4), 2.2) : 0
+      const kick = isHardware
+        ? Math.min(1.0, Math.pow(smoothPeak * 1.35, 1.4) + (isTransient ? 0.35 : 0))
+        : synthKick
+
+      // Spawn expanding shockwave ring on physical bass kick
+      const shouldTriggerPulse = isHardware ? isTransient : (playing && currentBeatInt !== prevBeatInt)
+      if (playing && shouldTriggerPulse) {
         if (type === 'pulse' || type === 'halo') {
           pulseRingsRef.current.push({ radius: Math.max(4, h * 0.15), alpha: 1.0 })
           if (pulseRingsRef.current.length > 8) pulseRingsRef.current.shift()
         }
       }
 
-      // Punchy kick transient (explodes on beat 1 and 3)
-      const kick = playing ? Math.pow(Math.max(0, 1 - beatPhase * 3.4), 2.2) : 0
       // Snappy snare impulse (accents beat 2 and 4)
       const snarePhase = (beatPhase + 0.5) % 1.0
-      const snare = playing ? Math.pow(Math.max(0, 1 - snarePhase * 3.2), 2.0) : 0
+      const snare = isHardware
+        ? Math.min(1.0, smoothPeak * 0.85)
+        : (playing ? Math.pow(Math.max(0, 1 - snarePhase * 3.2), 2.0) : 0)
       // 16th-note hi-hat tick
       const hatPhase = (beatProgress * 4) % 1.0
-      const hat = playing ? Math.pow(Math.max(0, 1 - hatPhase * 3.8), 1.8) : 0
+      const hat = isHardware
+        ? Math.min(1.0, smoothPeak * 0.6)
+        : (playing ? Math.pow(Math.max(0, 1 - hatPhase * 3.8), 1.8) : 0)
 
       // Compute multi-band frequency energies
       for (let i = 0; i < BIN_COUNT; i++) {
         const norm = i / BIN_COUNT
         // Sub-bass & kick (bins 0-7)
-        const bass = Math.max(0, 1 - norm * 2.8) * (kick * 0.95 + 0.08)
+        const bass = Math.max(0, 1 - norm * 2.8) * (kick * 1.1 + (isHardware ? smoothPeak * 0.35 : 0.06))
         // Mid-range vocal & snare (bins 8-20)
         const midDist = Math.abs(norm - 0.44) * 2.6
-        const mid = Math.max(0, 1 - midDist) * (snare * 0.85 + 0.12)
+        const mid = Math.max(0, 1 - midDist) * (snare * 0.85 + 0.10)
         // Treble & percussion shimmer (bins 21-31)
-        const treble = Math.max(0, (norm - 0.5) * 2.2) * (hat * 0.8 + 0.1)
+        const treble = Math.max(0, (norm - 0.5) * 2.2) * (hat * 0.8 + 0.08)
         // Musical harmonic cadence
         const harm =
-          Math.sin(localPos * 7.5 + i * 0.75) * 0.12 +
-          Math.cos(localPos * 4.2 - i * 0.55) * 0.08
+          (Math.sin(localPos * 7.5 + i * 0.75) * 0.08 +
+          Math.cos(localPos * 4.2 - i * 0.55) * 0.05) * (isHardware ? Math.min(1.0, smoothPeak * 2.5) : 1)
 
-        const rawAmp = playing ? Math.min(1.0, Math.max(0.04, bass + mid + treble + harm)) : 0.02
+        const rawAmp = playing ? Math.min(1.0, Math.max(0.02, bass + mid + treble + harm)) : 0.02
         const targetH = rawAmp * (h - 4)
 
         const cur = smoothRef.current[i] ?? 0
@@ -2294,7 +2324,7 @@ function VisualizerCanvas({
         const barW = 3
         const gap = 2
         const n = Math.floor(w / (barW + gap))
-        const amp = playing ? 0.95 : 0.08
+        const amp = playing ? (isHardware ? Math.min(1.0, 0.12 + smoothPeak * 0.88) : 0.95) : 0.08
         const t = localPos * 4.2
 
         ctx.fillStyle = baseColor
@@ -2348,16 +2378,27 @@ function VisualizerCanvas({
       // ─────────────────────────────────────────────────────────────
       else if (type === 'wave') {
         const points: { x: number; y: number }[] = []
-        const amp = playing ? h * (0.36 + kick * 0.16) : h * 0.06
+        // Effective energy: when hardware audio is active, smoothly scales with real audio peak!
+        // Quiet dialogue: smoothPeak ~ 0.06 -> amp ~ h * 0.10 (subtle resting wave)
+        // Heavy bass drops: smoothPeak ~ 0.80 -> amp ~ h * 0.54 (soaring explosive wave)
+        const effectiveEnergy = isHardware
+          ? Math.min(1.0, smoothPeak * 1.35)
+          : (playing ? 0.35 + kick * 0.45 : 0.04)
+
+        const amp = playing ? h * (0.06 + effectiveEnergy * 0.48) : h * 0.04
         const step = Math.max(3, Math.floor(w / 70))
+
+        // Center subwoofer bass kick deflection
+        const centerDeflection = kick > 0.22 ? (kick - 0.22) * h * 0.32 : 0
 
         for (let x = 0; x <= w; x += step) {
           const normX = (x / w) * Math.PI * 4
+          const centerWeight = Math.sin((x / w) * Math.PI)
           const y =
             h / 2 +
             Math.sin(normX + localPos * (bpm / 60) * 3.14) * amp * 0.7 +
-            Math.cos(normX * 2.2 - localPos * 4.2) * amp * 0.3 +
-            (kick > 0.25 ? (Math.random() - 0.5) * kick * 5 : 0)
+            Math.cos(normX * 2.2 - localPos * 4.2) * amp * 0.3 -
+            centerWeight * centerDeflection
           points.push({ x, y })
         }
 
@@ -2374,9 +2415,10 @@ function VisualizerCanvas({
           ctx.lineTo(w, h)
           ctx.closePath()
 
+          const fillAlpha = Math.min(0.42, 0.06 + effectiveEnergy * 0.32)
           const fillGrad = ctx.createLinearGradient(0, 0, 0, h)
-          safeAddColorStop(fillGrad, 0, 'rgba(56, 189, 248, 0.28)', 'transparent')
-          safeAddColorStop(fillGrad, 1, 'rgba(56, 189, 248, 0.02)', 'transparent')
+          safeAddColorStop(fillGrad, 0, `rgba(56, 189, 248, ${fillAlpha.toFixed(2)})`, 'transparent')
+          safeAddColorStop(fillGrad, 1, 'rgba(56, 189, 248, 0.01)', 'transparent')
           ctx.fillStyle = fillGrad
           ctx.fill()
         }
@@ -2386,7 +2428,7 @@ function VisualizerCanvas({
         ctx.lineWidth = 2.4
         ctx.strokeStyle = '#ffffff'
         ctx.shadowColor = baseColor
-        ctx.shadowBlur = playing ? 12 : 3
+        ctx.shadowBlur = playing ? Math.floor(4 + effectiveEnergy * 18) : 2
 
         if (firstPt) {
           ctx.moveTo(firstPt.x, firstPt.y)
@@ -2461,7 +2503,9 @@ function VisualizerCanvas({
         const meterW = Math.max(40, (w - 10) / 2)
         // High-sensitivity ballistic drive: hits red zone on kicks!
         const targetVal = playing
-          ? Math.min(1.0, 0.12 + kick * 0.72 + (smoothRef.current[2] || 0) / (h - 4) * 0.55)
+          ? (isHardware
+              ? Math.min(1.0, smoothPeak * 1.25 + (isTransient ? 0.25 : 0))
+              : Math.min(1.0, 0.12 + kick * 0.72 + ((smoothRef.current[2] || 0) / (h - 4)) * 0.55))
           : 0
         needleRef.current += (targetVal - needleRef.current) * (targetVal > needleRef.current ? 0.75 : 0.22)
         const needleVal = Math.min(1.0, Math.max(0, needleRef.current))
@@ -3665,6 +3709,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
         {showLoop && !isCompactHeader && (
           <button
             type="button"
+            onMouseDown={(e) => e.preventDefault()}
             onClick={(e) => {
               e.stopPropagation()
               ;(e.currentTarget as HTMLElement)?.blur()
@@ -3676,7 +3721,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
               }
             }}
             title="Toggle Loop"
-            className={`flex h-8 w-8 items-center justify-center transition-all outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none ${
+            className={`flex h-8 w-8 items-center justify-center transition-all border-none outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none ${
               isLooping
                 ? 'text-[var(--accent)] drop-shadow-[0_0_6px_var(--accent)] scale-110'
                 : 'text-[var(--text-tertiary)] hover:text-white'
@@ -3688,6 +3733,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
 
         <button
           type="button"
+          onMouseDown={(e) => e.preventDefault()}
           onClick={prevTrack}
           aria-label="Previous Track"
           className={btnBoxClass}
@@ -3697,6 +3743,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
 
         <button
           type="button"
+          onMouseDown={(e) => e.preventDefault()}
           onClick={togglePlay}
           aria-label={np.playing ? 'Pause' : 'Play'}
           className={playBtnClass}
@@ -3710,6 +3757,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
 
         <button
           type="button"
+          onMouseDown={(e) => e.preventDefault()}
           onClick={nextTrack}
           aria-label="Next Track"
           className={btnBoxClass}
@@ -3892,6 +3940,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                   playbackPos={playbackPos}
                   title={np.title}
                   artist={np.artist}
+                  liveAudioPeakRef={liveAudioPeakRef}
                 />
               </div>
             )}
@@ -3945,22 +3994,25 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={prevTrack}
-                    className="flex h-7 w-7 items-center justify-center text-white/80 hover:text-white"
+                    className="flex h-7 w-7 items-center justify-center text-white/80 hover:text-white border-none outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none"
                   >
                     <SkipBack size={16} />
                   </button>
                   <button
                     type="button"
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={togglePlay}
-                    className="flex h-7 w-7 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--on-accent)]"
+                    className="flex h-7 w-7 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--on-accent)] border-none outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none"
                   >
                     {np.playing ? <Pause size={14} /> : <Play size={14} className="ml-0.5" />}
                   </button>
                   <button
                     type="button"
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={nextTrack}
-                    className="flex h-7 w-7 items-center justify-center text-white/80 hover:text-white"
+                    className="flex h-7 w-7 items-center justify-center text-white/80 hover:text-white border-none outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none"
                   >
                     <SkipForward size={16} />
                   </button>
@@ -4055,6 +4107,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                         playbackPos={playbackPos}
                         title={np.title}
                         artist={np.artist}
+                        liveAudioPeakRef={liveAudioPeakRef}
                       />
                     </HudElementWrapper>
                   )}
@@ -4163,6 +4216,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                       playbackPos={playbackPos}
                       title={np.title}
                       artist={np.artist}
+                      liveAudioPeakRef={liveAudioPeakRef}
                     />
                   </HudElementWrapper>
                 )}
@@ -4278,6 +4332,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                       playbackPos={playbackPos}
                       title={np.title}
                       artist={np.artist}
+                      liveAudioPeakRef={liveAudioPeakRef}
                     />
                   </HudElementWrapper>
                 )}

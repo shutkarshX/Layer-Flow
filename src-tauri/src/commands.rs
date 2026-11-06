@@ -1071,6 +1071,18 @@ fn read_thumb(
 }
 
 #[cfg(target_os = "windows")]
+fn send_extended_media_key(vk: u8, scan: u8) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        keybd_event, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    };
+    unsafe {
+        keybd_event(vk, scan, KEYEVENTF_EXTENDEDKEY, 0);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        keybd_event(vk, scan, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn apply(
     mgr: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager,
     cmd: Cmd,
@@ -1113,21 +1125,39 @@ fn apply(
         sessions.into_iter().next()
     })();
 
-    let mut handled = false;
     if let Some(s) = session.as_ref() {
-        let op = match cmd {
-            Cmd::Next => s.TrySkipNextAsync(),
-            Cmd::Prev => s.TrySkipPreviousAsync(),
+        match cmd {
+            Cmd::Next => {
+                // Call both WinRT async skip and extended hardware media key so web players (YouTube/Chrome)
+                // and native apps (Spotify) skip tracks reliably without being ignored.
+                let _ = s.TrySkipNextAsync();
+                send_extended_media_key(0xB0, 0x19);
+            }
+            Cmd::Prev => {
+                let _ = s.TrySkipPreviousAsync();
+                send_extended_media_key(0xB1, 0x10);
+            }
             Cmd::Toggle => {
-                if is_currently_playing {
+                let mut toggled = false;
+                let op = if is_currently_playing {
                     s.TryPauseAsync()
                 } else {
                     s.TryPlayAsync()
+                };
+                if let Ok(op) = op {
+                    if let Some(ok) = await_op(op, 800) {
+                        toggled = ok;
+                    }
+                }
+                if !toggled {
+                    send_extended_media_key(0xB3, 0x22);
                 }
             }
             Cmd::Seek(sec) => {
                 let ticks = (sec.max(0.0) * 10_000_000.0) as i64;
-                s.TryChangePlaybackPositionAsync(ticks)
+                if let Ok(op) = s.TryChangePlaybackPositionAsync(ticks) {
+                    let _ = await_op(op, 800);
+                }
             }
             Cmd::Loop(repeat) => {
                 let mode = if repeat {
@@ -1135,32 +1165,18 @@ fn apply(
                 } else {
                     windows::Media::MediaPlaybackAutoRepeatMode::None
                 };
-                s.TryChangeAutoRepeatModeAsync(mode)
-            }
-        };
-
-        if let Ok(op) = op {
-            if let Some(ok) = await_op(op, 800) {
-                handled = ok;
+                if let Ok(op) = s.TryChangeAutoRepeatModeAsync(mode) {
+                    let _ = await_op(op, 800);
+                }
             }
         }
-    }
-
-    // If SMTC command was rejected or unhandled by browser/media stream,
-    // fallback to universal Windows multimedia key dispatch.
-    if !handled {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP};
-        let vk = match cmd {
-            Cmd::Toggle => Some(0xB3u8), // VK_MEDIA_PLAY_PAUSE
-            Cmd::Next => Some(0xB0u8),   // VK_MEDIA_NEXT_TRACK
-            Cmd::Prev => Some(0xB1u8),   // VK_MEDIA_PREV_TRACK
-            _ => None,
-        };
-        if let Some(key) = vk {
-            unsafe {
-                keybd_event(key, 0, 0, 0);
-                keybd_event(key, 0, KEYEVENTF_KEYUP, 0);
-            }
+    } else {
+        // Fallback if no active SMTC session exists at all
+        match cmd {
+            Cmd::Toggle => send_extended_media_key(0xB3, 0x22),
+            Cmd::Next => send_extended_media_key(0xB0, 0x19),
+            Cmd::Prev => send_extended_media_key(0xB1, 0x10),
+            _ => {}
         }
     }
 }

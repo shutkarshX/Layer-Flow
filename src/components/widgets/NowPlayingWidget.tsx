@@ -3172,7 +3172,11 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     setLyrics(parseLrc(cur.lyrics))
   }, [mockIndex])
 
-  // Desktop IPC Polling
+  // Desktop IPC Polling (with jitter-free play/pause debounce)
+  const lastToggleTimeRef = useRef<number>(0)
+  const sessionRef = useRef(session)
+  sessionRef.current = session
+
   useEffect(() => {
     if (!isTauri()) return
     let active = true
@@ -3180,6 +3184,14 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
       try {
         const [np, v] = await Promise.all([getNowPlaying(), getVolume()])
         if (!active) return
+
+        // Smooth debounce: during 1.8s after clicking play/pause,
+        // do not let delayed OS poll readings jitter or flicker the button!
+        const isRecentlyToggled = performance.now() - lastToggleTimeRef.current < 1800
+        if (isRecentlyToggled && sessionRef.current) {
+          np.playing = sessionRef.current.playing
+        }
+
         setSession(np)
         if (typeof v === 'number' && Number.isFinite(v)) setVol(v)
         if (np?.hasSession) {
@@ -3456,17 +3468,25 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
 
   const togglePlay = (e: React.MouseEvent) => {
     e.stopPropagation()
+    const currentPlaying = session?.playing ?? isPlaying
+    const nextPlaying = !currentPlaying
+    lastToggleTimeRef.current = performance.now()
+    setIsPlaying(nextPlaying)
+    setSession((prev) => (prev ? { ...prev, playing: nextPlaying } : null))
+    lastSyncRef.current = {
+      pos: livePos,
+      time: performance.now(),
+      playing: nextPlaying,
+    }
     if (isTauri()) {
       mediaControl('playpause').catch(() => {})
-      setSession((prev) => (prev ? { ...prev, playing: !prev.playing } : null))
-    } else {
-      setIsPlaying((prev) => !prev)
-      setSession((prev) => (prev ? { ...prev, playing: !prev.playing } : null))
     }
   }
 
   const prevTrack = (e: React.MouseEvent) => {
     e.stopPropagation()
+    lastSyncRef.current = { pos: 0, time: performance.now(), playing: true }
+    setLivePos(0)
     if (isTauri()) {
       mediaControl('prev').catch(() => {})
     } else {
@@ -3476,6 +3496,8 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
 
   const nextTrack = (e: React.MouseEvent) => {
     e.stopPropagation()
+    lastSyncRef.current = { pos: 0, time: performance.now(), playing: true }
+    setLivePos(0)
     if (isTauri()) {
       mediaControl('next').catch(() => {})
     } else {

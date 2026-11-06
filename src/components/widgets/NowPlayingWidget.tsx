@@ -51,7 +51,7 @@ function parseLrc(lrcText: string): LyricLine[] {
   const srtRegex = /(?:(\d{1,2}):)?(\d{2}):(\d{2})[,.](\d{1,3})\s*-->/
 
   // 3. YouTube Chapter / timestamp: 01:23 or 1:23:45 at start of line
-  const chapterRegex = /^(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\s+[-–—]?\s*(.*)$/
+  const chapterRegex = /^(?:(\d{1,2}):)?(\d{1,2}):(\d{2})/
 
   for (let i = 0; i < lines.length; i++) {
     const rawLine = lines[i]?.trim()
@@ -65,7 +65,7 @@ function parseLrc(lrcText: string): LyricLine[] {
       const secs = parseInt(lrcMatch[3]!, 10)
       const millis = lrcMatch[4] ? parseFloat('0.' + lrcMatch[4]) : 0
       const time = hours * 3600 + mins * 60 + secs + millis
-      const text = rawLine.replace(/\[.*?\]/g, '').trim()
+      const closeBracket = rawLine.lastIndexOf(']'); const text = (closeBracket !== -1 ? rawLine.slice(closeBracket + 1) : rawLine).trim()
       if (text.length > 0) results.push({ time, text })
       continue
     }
@@ -92,7 +92,7 @@ function parseLrc(lrcText: string): LyricLine[] {
       const hours = chapMatch[1] ? parseInt(chapMatch[1], 10) : 0
       const mins = parseInt(chapMatch[2]!, 10)
       const secs = parseInt(chapMatch[3]!, 10)
-      const text = chapMatch[4]?.trim() || ''
+      const timeStr = chapMatch[0]; const text = rawLine.slice(timeStr.length).replace(/^[\s–—-]+/, '').trim()
       if (text.length > 0) {
         results.push({ time: hours * 3600 + mins * 60 + secs, text })
       }
@@ -114,10 +114,17 @@ function cleanTrackTitle(rawTitle: string, rawArtist?: string): { title: string;
     /\b(podcast|shows?)\b/i.test(artist)
 
   // Strip YouTube suffixes & metadata noise
-  title = title
-    .replace(/\s*[\(\[](?:official\s*(?:music\s*)?video|official\s*audio|lyric\s*video|lyrics?|visualizer|video|audio|mv|hd|4k|remastered|live|prod\..*?)[\)\]]/gi, '')
-    .replace(/\s*\|\s*(?:official\s*video|official\s*audio|visualizer).*$/i, '')
-    .trim()
+  const pipeIdx = title.indexOf('|')
+  if (pipeIdx !== -1) title = title.slice(0, pipeIdx).trim()
+  let cleaned = ''
+  let inBracket = false
+  for (let c = 0; c < title.length; c++) {
+    const ch = title[c]
+    if (ch === '(' || ch === '[') inBracket = true
+    else if (ch === ')' || ch === ']') inBracket = false
+    else if (!inBracket) cleaned += ch
+  }
+  if (cleaned.trim().length > 0) title = cleaned.trim()
 
   // If title has "Artist - Track" and artist is empty or generic browser/YouTube
   if ((!artist || /chrome|edge|firefox|opera|browser|youtube/i.test(artist)) && title.includes(' - ')) {
@@ -137,8 +144,19 @@ export function extractYouTubeVideoId(input?: string): string | null {
   const trimmed = input.trim()
   if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) return trimmed
 
-  const mUrl = trimmed.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([a-zA-Z0-9_-]{11})/)
-  if (mUrl && mUrl[1]) return mUrl[1]
+
+  if (trimmed.includes('youtu.be/')) {
+    const after = trimmed.split('youtu.be/')[1]?.split(/[?&#]/)[0]
+    if (after && /^[a-zA-Z0-9_-]{11}$/.test(after)) return after
+  }
+  if (trimmed.includes('v=')) {
+    const after = trimmed.split('v=')[1]?.split('&')[0]
+    if (after && /^[a-zA-Z0-9_-]{11}$/.test(after)) return after
+  }
+  if (trimmed.includes('/embed/')) {
+    const after = trimmed.split('/embed/')[1]?.split(/[?&#]/)[0]
+    if (after && /^[a-zA-Z0-9_-]{11}$/.test(after)) return after
+  }
 
   const mThumb = trimmed.match(/\/vi\/([a-zA-Z0-9_-]{11})\//)
   if (mThumb && mThumb[1]) return mThumb[1]

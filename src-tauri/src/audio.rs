@@ -33,7 +33,7 @@ mod imp {
     use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
     use windows::Win32::Media::Audio::{
         eCapture, eConsole, eRender, EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator,
-        DEVICE_STATE_ACTIVE,
+        DEVICE_STATE_ACTIVE, IAudioMeterInformation,
     };
     use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
     use windows::Win32::System::Com::{
@@ -375,6 +375,69 @@ mod imp {
             ok
         }
     }
+    static AUDIO_PEAK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    pub fn get_audio_peak() -> f32 {
+        f32::from_bits(AUDIO_PEAK.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub fn start_audio_meter(app: tauri::AppHandle) {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        use tauri::Emitter;
+
+        std::thread::Builder::new()
+            .name("audio-meter".into())
+            .spawn(move || {
+                com_init();
+                let mut meter_opt: Option<IAudioMeterInformation> = None;
+                let mut last_emit_peak = 0.0f32;
+
+                loop {
+                    if meter_opt.is_none() {
+                        unsafe {
+                            let enumr: Result<IMMDeviceEnumerator, _> =
+                                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL);
+                            if let Ok(enumr) = enumr {
+                                if let Ok(dev) = enumr.GetDefaultAudioEndpoint(eRender, eConsole) {
+                                    if let Ok(m) = dev.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None) {
+                                        meter_opt = Some(m);
+                                    }
+                                }
+                            }
+                        }
+                        if meter_opt.is_none() {
+                            std::thread::sleep(Duration::from_millis(500));
+                            continue;
+                        }
+                    }
+
+                    let mut peak = 0.0f32;
+                    let ok = if let Some(m) = &meter_opt {
+                        unsafe { m.GetPeakValue(&mut peak).is_ok() }
+                    } else {
+                        false
+                    };
+
+                    if !ok {
+                        meter_opt = None;
+                        std::thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
+
+                    AUDIO_PEAK.store(peak.to_bits(), Ordering::Relaxed);
+
+                    if peak > 0.005 || last_emit_peak > 0.005 {
+                        let _ = app.emit("audio-peak", peak);
+                        last_emit_peak = peak;
+                    }
+
+                    std::thread::sleep(Duration::from_millis(28));
+                }
+            })
+            .ok();
+    }
+
 }
 
 #[cfg(target_os = "windows")]
@@ -398,6 +461,12 @@ pub fn set_session_volume(id: &str, level: f32) -> bool {
 pub fn set_session_mute(id: &str, muted: bool) -> bool {
     imp::set_session_mute(id, muted)
 }
+pub fn get_audio_peak() -> f32 {
+    imp::get_audio_peak()
+}
+pub fn start_audio_meter(app: tauri::AppHandle) {
+    imp::start_audio_meter(app);
+}
 
 #[cfg(not(target_os = "windows"))]
 pub fn list_devices() -> Vec<AudioDevice> {
@@ -419,4 +488,9 @@ pub fn set_session_volume(_id: &str, _level: f32) -> bool {
 pub fn set_session_mute(_id: &str, _muted: bool) -> bool {
     false
 }
+pub fn get_audio_peak() -> f32 {
+    0.0
+}
+pub fn start_audio_meter(_app: tauri::AppHandle) {}
+
 

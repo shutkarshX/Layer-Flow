@@ -91,6 +91,15 @@ export const getNowPlaying = () => invoke<NowPlaying>('get_now_playing')
 export const mediaControl = (action: 'playpause' | 'next' | 'prev') =>
   invoke<void>('media_control', { action })
 
+export const mediaSeek = (position: number) =>
+  invoke<void>('media_seek', { position })
+
+export const mediaRepeat = (repeat: boolean) =>
+  invoke<void>('media_repeat', { repeat })
+
+export const getAudioPeak = () =>
+  invoke<number>('get_audio_peak')
+
 export interface NotificationItem {
   id: number
   app: string

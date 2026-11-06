@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { useTranslation } from 'react-i18next'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Music, Play, Pause, SkipBack, SkipForward, Volume1, Volume2, VolumeX, Repeat, Mic2, Move } from 'lucide-react'
@@ -8,6 +9,8 @@ import {
   getWallpaperAccent,
   isTauri,
   mediaControl,
+  mediaSeek,
+  mediaRepeat,
   setVolume,
   type NowPlaying,
 } from '../../lib/ipc'
@@ -103,6 +106,39 @@ function parseLrc(lrcText: string): LyricLine[] {
   return results.sort((a, b) => a.time - b.time)
 }
 
+// ── Cover Art Lookup & In-Memory Cache ──
+const artCache = new Map<string, string>()
+
+export async function fetchCoverArt(rawTitle: string, rawArtist?: string): Promise<string | null> {
+  const { title, artist } = cleanTrackTitle(rawTitle, rawArtist)
+  const cacheKey = `${title}|${artist}`.toLowerCase()
+  if (artCache.has(cacheKey)) return artCache.get(cacheKey) || null
+
+  const queries = [
+    `${title} ${artist}`.trim(),
+    title.trim(),
+  ].filter((q) => q.length > 2)
+
+  for (const q of queries) {
+    try {
+      const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=1`)
+      if (res.ok) {
+        const data = await res.json()
+        if (data && data.resultCount > 0 && data.results?.[0]?.artworkUrl100) {
+          const highRes = data.results[0].artworkUrl100.replace('100x100bb.jpg', '600x600bb.jpg')
+          artCache.set(cacheKey, highRes)
+          return highRes
+        }
+      }
+    } catch {
+      // Continue
+    }
+  }
+
+  artCache.set(cacheKey, '')
+  return null
+}
+
 // ── Intelligent Music & YouTube Title Cleaner ──
 function cleanTrackTitle(rawTitle: string, rawArtist?: string): { title: string; artist: string; isLikelyPodcast: boolean } {
   let title = rawTitle || ''
@@ -174,9 +210,10 @@ export async function fetchYouTubeCaptions(videoId: string): Promise<LyricLine[]
   try {
     // 1. Try Invidious API for WebVTT captions
     const invidiousInstances = [
-      'https://invidious.nerdvpn.de',
-      'https://vid.puffyan.us',
       'https://inv.nadeko.net',
+      'https://invidious.drgns.space',
+      'https://yt.artemislena.eu',
+      'https://invidious.nerdvpn.de',
     ]
 
     for (const host of invidiousInstances) {
@@ -1340,6 +1377,7 @@ function SubwooferHaloArtwork({
   playbackPos = 0,
   beatOffset = 0,
   onTapBeatSync,
+  liveAudioPeakRef,
 }: {
   thumb: string
   title: string
@@ -1351,6 +1389,7 @@ function SubwooferHaloArtwork({
   playbackPos?: number
   beatOffset?: number
   onTapBeatSync?: () => void
+  liveAudioPeakRef?: React.MutableRefObject<number>
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const coneRef = useRef<HTMLDivElement>(null)
@@ -1419,12 +1458,17 @@ function SubwooferHaloArtwork({
       const beatPhase = (beatProgress % 1.0 + 1.0) % 1.0
       const currentBeatInt = Math.floor(beatProgress)
 
-      // Punchy bass kick transient (explodes on beat 1 and 3)
-      const kick = playing ? Math.pow(Math.max(0, 1 - beatPhase * 3.4), 2.2) : 0
+      // Real-time hardware audio peak reactivity (or beat fallback)
+      const livePeak = liveAudioPeakRef?.current || 0
+      const isLiveHardware = livePeak > 0.005
+      const kick = isLiveHardware
+        ? Math.min(1.0, Math.pow(livePeak * 1.35, 1.45))
+        : (playing ? Math.pow(Math.max(0, 1 - beatPhase * 3.4), 2.2) : 0)
       const snarePhase = ((beatPhase + 0.5) % 1.0 + 1.0) % 1.0
       const snare = playing ? Math.pow(Math.max(0, 1 - snarePhase * 3.2), 2.0) : 0
       const hatPhase = ((beatProgress * 4) % 1.0 + 1.0) % 1.0
       const hat = playing ? Math.pow(Math.max(0, 1 - hatPhase * 3.8), 1.8) : 0
+      const rayEnergy = isLiveHardware ? Math.min(1.0, livePeak * 1.6) : (playing ? 0.35 + kick * 0.65 : 0)
 
       // Dynamically pump subwoofer cone excursion in lockstep with the kick
       if (coneRef.current) {
@@ -1477,7 +1521,7 @@ function SubwooferHaloArtwork({
         const treblePart = Math.pow(distFromPole, 1.8) * (hat * 0.65 + 0.08)
         const harm = Math.sin(localPos * 7.2 + i * 0.6) * 0.1
 
-        const targetAmp = playing ? Math.min(1.0, Math.max(0.06, bassPart + midPart + treblePart + harm)) : 0.04
+        const targetAmp = (playing || isLiveHardware) ? Math.min(1.0, Math.max(0.06, (bassPart + midPart + treblePart + harm) * (isLiveHardware ? rayEnergy : 1))) : 0.04
         const targetLen = Math.max(2.5, targetAmp * maxRayLen)
 
         const cur = smoothRays[i] || 0
@@ -1551,11 +1595,17 @@ function SubwooferHaloArtwork({
         >
           {/* Inner Speaker Cone with Album Artwork */}
           <div className="relative w-full h-full rounded-full overflow-hidden shadow-inner ring-1 ring-white/20">
-            <img
-              src={thumb}
-              alt={title}
-              className="w-full h-full rounded-full object-cover select-none pointer-events-none"
-            />
+            {thumb ? (
+              <img
+                src={thumb}
+                alt={title}
+                className="w-full h-full rounded-full object-cover select-none pointer-events-none"
+              />
+            ) : (
+              <div className="w-full h-full bg-gradient-to-br from-zinc-800 to-zinc-950 flex items-center justify-center">
+                <Music className="h-1/3 w-1/3 text-white/40" />
+              </div>
+            )}
             {/* Cone depth gloss & lighting */}
             <div
               className="absolute inset-0 rounded-full pointer-events-none opacity-30 mix-blend-overlay"
@@ -1597,6 +1647,7 @@ function ArtworkRenderer({
   playbackPos = 0,
   beatOffset = 0,
   onTapBeatSync,
+  liveAudioPeakRef,
 }: {
   thumb: string
   title: string
@@ -1611,6 +1662,7 @@ function ArtworkRenderer({
   playbackPos?: number
   beatOffset?: number
   onTapBeatSync?: () => void
+  liveAudioPeakRef?: React.MutableRefObject<number>
 }) {
   // When Beat Visualizer is 'halo', the artwork becomes the iconic Trap Nation Subwoofer Bass Halo!
   if (visualizerType === 'halo') {
@@ -1626,6 +1678,7 @@ function ArtworkRenderer({
         playbackPos={playbackPos}
         beatOffset={beatOffset}
         onTapBeatSync={onTapBeatSync}
+        liveAudioPeakRef={liveAudioPeakRef}
       />
     )
   }
@@ -1843,11 +1896,13 @@ function ArtworkRenderer({
 
           {/* Center Album Artwork Circular Label */}
           <div className="relative w-[50%] h-[50%] rounded-full overflow-hidden shadow-inner ring-1 ring-white/20">
-            <img
-              src={thumb}
-              alt={title}
-              className="w-full h-full object-cover"
-            />
+            {thumb ? (
+              <img src={thumb} alt={title} className="w-full h-full object-cover" />
+            ) : (
+              <div className="w-full h-full bg-zinc-900 flex items-center justify-center">
+                <Music className="h-1/3 w-1/3 text-white/40" />
+              </div>
+            )}
           </div>
 
           {/* Center Spindle Hole */}
@@ -1876,12 +1931,21 @@ function ArtworkRenderer({
             }}
           />
         )}
-        <img
-          src={thumb}
-          alt={title}
-          style={{ animation: bounceAnimation }}
-          className="w-full h-full rounded-full object-cover shadow-xl ring-2 ring-white/20 transition-all aspect-square"
-        />
+        {thumb ? (
+          <img
+            src={thumb}
+            alt={title}
+            style={{ animation: bounceAnimation }}
+            className="w-full h-full rounded-full object-cover shadow-xl ring-2 ring-white/20 transition-all aspect-square"
+          />
+        ) : (
+          <div
+            className="w-full h-full rounded-full bg-gradient-to-br from-white/10 to-white/5 border border-white/20 shadow-xl flex items-center justify-center aspect-square"
+            style={{ animation: bounceAnimation }}
+          >
+            <Music className="h-1/3 w-1/3 text-white/50" />
+          </div>
+        )}
       </div>
     )
   }
@@ -1904,14 +1968,23 @@ function ArtworkRenderer({
           }}
         />
       )}
-      <img
-        src={thumb}
-        alt={title}
-        style={{ animation: bounceAnimation }}
-        className={`max-h-full max-w-full rounded-[10px] object-cover shadow-xl ring-1 ring-white/15 transition-all ${
-          adaptiveRatio ? 'aspect-auto' : 'aspect-square'
-        }`}
-      />
+      {thumb ? (
+        <img
+          src={thumb}
+          alt={title}
+          style={{ animation: bounceAnimation }}
+          className={`max-h-full max-w-full rounded-[10px] object-cover shadow-xl ring-1 ring-white/15 transition-all ${
+            adaptiveRatio ? 'aspect-auto' : 'aspect-square'
+          }`}
+        />
+      ) : (
+        <div
+          className="h-full w-full rounded-[10px] bg-gradient-to-br from-white/10 to-white/5 border border-white/15 shadow-xl flex items-center justify-center aspect-square"
+          style={{ animation: bounceAnimation }}
+        >
+          <Music className="h-2/5 w-2/5 text-white/40" />
+        </div>
+      )}
     </div>
   )
 }
@@ -1929,38 +2002,88 @@ function ProgressBar({
   onSeek?: (pos: number) => void
 }) {
   if (mode === 'hidden') return null
-  const pct = duration > 0 ? (position / duration) * 100 : 0
   const isHoverMode = mode === 'hover'
+  const barRef = useRef<HTMLDivElement>(null)
+  const [isDragging, setIsDragging] = useState(false)
+  const [dragPct, setDragPct] = useState<number | null>(null)
 
-  const handleBarClick = (e: React.MouseEvent<HTMLDivElement>) => {
+  const currentPct = duration > 0 ? (position / duration) * 100 : 0
+  const effectivePct = isDragging && dragPct !== null ? dragPct * 100 : currentPct
+  const displayPos = isDragging && dragPct !== null ? dragPct * duration : position
+
+  const calcPct = (clientX: number) => {
+    if (!barRef.current) return 0
+    const rect = barRef.current.getBoundingClientRect()
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+  }
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.stopPropagation()
     if (!onSeek || duration <= 0) return
-    const rect = e.currentTarget.getBoundingClientRect()
-    const clickX = e.clientX - rect.left
-    const newPct = Math.max(0, Math.min(1, clickX / rect.width))
-    onSeek(newPct * duration)
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {}
+    setIsDragging(true)
+    setDragPct(calcPct(e.clientX))
+  }
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging) return
+    e.stopPropagation()
+    setDragPct(calcPct(e.clientX))
+  }
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging) return
+    e.stopPropagation()
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {}
+    setIsDragging(false)
+    const finalPct = dragPct !== null ? dragPct : calcPct(e.clientX)
+    setDragPct(null)
+    if (onSeek && duration > 0) {
+      onSeek(finalPct * duration)
+    }
   }
 
   return (
     <div
-      className={`flex w-full flex-col gap-1 py-0.5 transition-all duration-200 select-none ${
+      className={`group/prog flex w-full flex-col gap-1 py-0.5 transition-all duration-200 select-none ${
         isHoverMode ? 'opacity-0 group-hover:opacity-100 pointer-events-auto' : 'opacity-100'
       }`}
       onClick={(e) => e.stopPropagation()}
     >
       <div
-        className="relative flex h-3 w-full cursor-pointer items-center"
-        onClick={handleBarClick}
+        ref={barRef}
+        className="relative flex h-3.5 w-full cursor-pointer items-center py-1"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={() => {
+          setIsDragging(false)
+          setDragPct(null)
+        }}
       >
-        <div className="h-1.5 w-full rounded-full bg-white/20 overflow-hidden">
+        <div className="h-1.5 w-full rounded-full bg-white/20 overflow-hidden relative">
           <div
-            className="h-full bg-[var(--accent)] rounded-full transition-all duration-150"
-            style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+            className={`h-full bg-[var(--accent)] rounded-full ${
+              isDragging ? '' : 'transition-all duration-150'
+            }`}
+            style={{ width: `${Math.min(100, Math.max(0, effectivePct))}%` }}
           />
         </div>
+        <div
+          className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 h-3 w-3 rounded-full bg-white shadow-md transition-transform pointer-events-none ${
+            isDragging ? 'scale-125 ring-2 ring-[var(--accent)]' : 'scale-0 group-hover/prog:scale-100'
+          }`}
+          style={{ left: `${Math.min(100, Math.max(0, effectivePct))}%` }}
+        />
       </div>
       <div className="flex justify-between text-[10px] font-mono text-[var(--text-tertiary)] tabular-nums">
-        <span>{formatTime(position)}</span>
+        <span className={isDragging ? 'text-[var(--accent)] font-semibold' : ''}>
+          {formatTime(displayPos)}
+        </span>
         <span>{formatTime(duration)}</span>
       </div>
     </div>
@@ -2902,6 +3025,9 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
   const [livePos, setLivePos] = useState<number>(0)
   const [isPlaying, setIsPlaying] = useState<boolean>(true)
   const [isLooping, setIsLooping] = useState<boolean>(false)
+  const [discoveredThumb, setDiscoveredThumb] = useState<string | null>(null)
+  const lastSeekTimeRef = useRef<number>(0)
+  const liveAudioPeakRef = useRef<number>(0)
   const [lyrics, setLyrics] = useState<LyricLine[]>(() => parseLrc(currentMock.lyrics))
   const [activeLyricIdx, setActiveLyricIdx] = useState<number>(0)
   const [isKaraokeOpen, setIsKaraokeOpen] = useState<boolean>(false)
@@ -2926,6 +3052,41 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     }
     updateWallpaper()
   }, [])
+
+  // Real-time Hardware Audio Peak Listener
+  useEffect(() => {
+    if (!isTauri()) return
+    let unlisten: (() => void) | null = null
+    listen<number>('audio-peak', (e) => {
+      liveAudioPeakRef.current = e.payload
+    })
+      .then((un) => {
+        unlisten = un
+      })
+      .catch(() => {})
+    return () => {
+      if (unlisten) unlisten()
+    }
+  }, [])
+
+  // Online High-Definition Cover Art Fallback (for YouTube / Browser Streams)
+  useEffect(() => {
+    if (!session?.title) {
+      setDiscoveredThumb(null)
+      return
+    }
+    if (session.thumb && session.thumb.length > 0) {
+      setDiscoveredThumb(null)
+      return
+    }
+    let cancelled = false
+    fetchCoverArt(session.title, session.artist).then((art) => {
+      if (!cancelled && art) setDiscoveredThumb(art)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [session?.title, session?.artist, session?.thumb])
 
   // Widget settings with clean defaults
   const preset = widget.preset || 'compact'
@@ -3022,10 +3183,14 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
         setSession(np)
         if (typeof v === 'number' && Number.isFinite(v)) setVol(v)
         if (np?.hasSession) {
-          lastSyncRef.current = {
-            pos: np.position || 0,
-            time: performance.now(),
-            playing: np.playing,
+          const isRecentlySeeked = performance.now() - lastSeekTimeRef.current < 2500
+          const closeEnough = Math.abs((np.position || 0) - lastSyncRef.current.pos) < 1.0
+          if (!isRecentlySeeked || closeEnough) {
+            lastSyncRef.current = {
+              pos: np.position || 0,
+              time: performance.now(),
+              playing: np.playing,
+            }
           }
         }
       } catch {
@@ -3057,6 +3222,9 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
           const dur = session?.duration || 0
           const current = dur > 0 ? Math.min(dur, pos + elapsed) : pos + elapsed
           setLivePos(current)
+          if (isLooping && dur > 0 && current >= dur - 0.35) {
+            handleSeek(0)
+          }
         }
       } else {
         if (isPlaying) {
@@ -3120,6 +3288,49 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
             }
           }
         }
+
+        // 3b. Query LRCLIB with cleaned title alone
+        if (cleanTitle.length > 2) {
+          try {
+            const qT = encodeURIComponent(cleanTitle.trim())
+            const resT = await fetch(`https://lrclib.net/api/search?q=${qT}`)
+            if (resT.ok) {
+              const dataT = await resT.json()
+              if (cancelled) return
+              if (Array.isArray(dataT) && dataT.length > 0) {
+                const match = dataT.find((d) => d?.syncedLyrics) || dataT[0]
+                if (match?.syncedLyrics) {
+                  setLyrics(parseLrc(match.syncedLyrics))
+                  return
+                }
+              }
+            }
+          } catch {}
+        }
+
+        // 3c. Query Netease Cloud Music API (huge library of international, Indian, and regional music)
+        try {
+          const netRes = await fetch(`https://music.163.com/api/search/get/web?s=${encodeURIComponent(cleanTitle)}&type=1&offset=0&total=true&limit=1`)
+          if (netRes.ok) {
+            const nData = await netRes.json()
+            const sId = nData?.result?.songs?.[0]?.id
+            if (sId) {
+              const lrcRes = await fetch(`https://music.163.com/api/song/lyric?os=pc&id=${sId}&lv=-1&kv=-1&tv=-1`)
+              if (lrcRes.ok) {
+                const lrcData = await lrcRes.json()
+                if (cancelled) return
+                const rawLrc = lrcData?.lrc?.lyric
+                if (rawLrc && rawLrc.includes('[')) {
+                  const parsed = parseLrc(rawLrc)
+                  if (parsed.length > 0) {
+                    setLyrics(parsed)
+                    return
+                  }
+                }
+              }
+            }
+          }
+        } catch {}
 
         // 4. Fallback: try raw title query if clean title was different
         if (cleanTitle !== session.title) {
@@ -3196,6 +3407,8 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     }
   }, [playbackPos, lyrics])
 
+  const resolvedThumb = (session?.thumb && session.thumb.length > 0 ? session.thumb : discoveredThumb) || ''
+
   const np = session ?? {
     hasSession: true,
     title: currentMock.title,
@@ -3269,12 +3482,16 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
   }
 
   const handleSeek = (time: number) => {
+    lastSeekTimeRef.current = performance.now()
     lastSyncRef.current = {
       pos: time,
       time: performance.now(),
       playing: session?.playing ?? isPlaying,
     }
     setLivePos(time)
+    if (isTauri()) {
+      mediaSeek(time).catch(() => {})
+    }
   }
 
   // Outer container styling
@@ -3313,7 +3530,11 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
             type="button"
             onClick={(e) => {
               e.stopPropagation()
-              setIsLooping((p) => !p)
+              const nextVal = !isLooping
+              setIsLooping(nextVal)
+              if (isTauri()) {
+                mediaRepeat(nextVal).catch(() => {})
+              }
             }}
             title="Toggle Loop"
             className={`flex h-8 w-8 items-center justify-center transition-all ${
@@ -3626,11 +3847,12 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                     className="relative flex h-full max-h-full aspect-square shrink-0 items-center justify-center overflow-hidden"
                   >
                     <ArtworkRenderer
-                      thumb={np.thumb}
+                      thumb={resolvedThumb}
                       title={np.title}
                       design={artDesign}
                       isHero
                       adaptiveRatio={adaptiveArtRatio}
+                      liveAudioPeakRef={liveAudioPeakRef}
                       playing={np.playing}
                       visualizerType={visualizerType}
                       visualizerColor={visualizerColor}
@@ -3834,7 +4056,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                     artLayout === 'right' ? 'flex-row-reverse' : 'flex-row'
                   }`}
                 >
-                  {artLayout !== 'hidden' && np.thumb && (
+                  {artLayout !== 'hidden' && (
                     <HudElementWrapper
                       elementKey="artwork"
                       label="Artwork"
@@ -3846,11 +4068,12 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
                       className="shrink-0"
                     >
                       <ArtworkRenderer
-                        thumb={np.thumb}
+                        thumb={resolvedThumb}
                         title={np.title}
                         design={artDesign}
                         size={fluidThumbSize}
                         adaptiveRatio={adaptiveArtRatio}
+                        liveAudioPeakRef={liveAudioPeakRef}
                         playing={np.playing}
                         visualizerType={visualizerType}
                         visualizerColor={visualizerColor}

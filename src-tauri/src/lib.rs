@@ -126,6 +126,8 @@ pub fn run() {
             }
 
             window::setup_window(app)?;
+            #[cfg(target_os = "windows")]
+            crate::audio::start_audio_meter(app.handle().clone());
             // Shared pill rect for the optional Notch window (created on demand
             // by the frontend when enabled in Settings).
             let notch_hit: notch::SharedNotchHit =
@@ -256,6 +258,9 @@ pub fn run() {
             commands::get_app_icon,
             commands::get_now_playing,
             commands::media_control,
+            commands::media_seek,
+            commands::media_repeat,
+            commands::get_audio_peak,
             commands::get_notifications,
             commands::clear_notification,
             commands::clear_all_notifications,

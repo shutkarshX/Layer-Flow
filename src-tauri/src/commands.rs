@@ -823,6 +823,8 @@ enum Cmd {
     Next,
     Prev,
     Toggle,
+    Seek(f64),
+    Loop(bool),
 }
 
 #[cfg(target_os = "windows")]
@@ -1042,17 +1044,55 @@ fn apply(
     mgr: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager,
     cmd: Cmd,
 ) {
-    let session = match mgr.GetCurrentSession() {
-        Ok(s) => s,
-        Err(_) => return,
+    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status;
+    let list = mgr.GetSessions().ok();
+    let mut sessions: Vec<_> = list.as_ref().map(|l| l.into_iter().collect()).unwrap_or_default();
+    let playing_idx = sessions.iter().position(|s| {
+        s.GetPlaybackInfo()
+            .and_then(|i| i.PlaybackStatus())
+            .map(|st| st == Status::Playing)
+            .unwrap_or(false)
+    });
+    let session = match playing_idx {
+        Some(i) => sessions.swap_remove(i),
+        None => match mgr.GetCurrentSession() {
+            Ok(s) => s,
+            Err(_) if !sessions.is_empty() => sessions.swap_remove(0),
+            Err(_) => return,
+        },
     };
-    let op = match cmd {
-        Cmd::Next => session.TrySkipNextAsync(),
-        Cmd::Prev => session.TrySkipPreviousAsync(),
-        Cmd::Toggle => session.TryTogglePlayPauseAsync(),
-    };
-    if let Ok(op) = op {
-        let _ = await_op(op, 2000);
+    match cmd {
+        Cmd::Next => {
+            if let Ok(op) = session.TrySkipNextAsync() {
+                let _ = await_op(op, 2000);
+            }
+        }
+        Cmd::Prev => {
+            if let Ok(op) = session.TrySkipPreviousAsync() {
+                let _ = await_op(op, 2000);
+            }
+        }
+        Cmd::Toggle => {
+            if let Ok(op) = session.TryTogglePlayPauseAsync() {
+                let _ = await_op(op, 2000);
+            }
+        }
+        Cmd::Seek(sec) => {
+            let ticks = (sec.max(0.0) * 10_000_000.0) as i64;
+            if let Ok(op) = session.TryChangePlaybackPositionAsync(ticks) {
+                let _ = await_op(op, 2000);
+            }
+        }
+        Cmd::Loop(repeat) => {
+            let mode = if repeat {
+                windows::Media::MediaPlaybackAutoRepeatMode::Track
+            } else {
+                windows::Media::MediaPlaybackAutoRepeatMode::None
+            };
+            if let Ok(op) = session.TryChangeAutoRepeatModeAsync(mode) {
+                let _ = await_op(op, 2000);
+            }
+        }
     }
 }
 
@@ -1083,6 +1123,31 @@ pub fn media_control(action: String) {
     }
     #[cfg(not(target_os = "windows"))]
     let _ = action;
+}
+
+#[tauri::command]
+pub fn media_seek(position: f64) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = smtc().tx.send(Cmd::Seek(position));
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = position;
+}
+
+#[tauri::command]
+pub fn media_repeat(repeat: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = smtc().tx.send(Cmd::Loop(repeat));
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = repeat;
+}
+
+#[tauri::command]
+pub fn get_audio_peak() -> f32 {
+    crate::audio::get_audio_peak()
 }
 
 #[derive(serde::Serialize, Default)]

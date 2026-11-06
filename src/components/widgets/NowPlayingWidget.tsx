@@ -3128,7 +3128,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
 
   // Internal Element HUD layout & interactive screen dragging
   const hudLayout = widget.hudLayout || {}
-  const hudEditMode = widget.hudEditMode === true
+  const hudEditMode = widget.hudEditMode === true && !widget.locked
   const hudSelectedElement = widget.hudSelectedElement || 'controls'
 
   const handleHudSelect = (key: WidgetElementKey) => {

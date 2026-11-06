@@ -254,9 +254,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     toggleLock: (id) => {
       pushHistory()
       set((state) => ({
-        widgets: state.widgets.map((w) =>
-          w.id === id ? { ...w, locked: !w.locked } : w,
-        ),
+        widgets: state.widgets.map((w) => {
+          if (w.id === id) {
+            const nextLocked = !w.locked
+            return {
+              ...w,
+              locked: nextLocked,
+              ...(nextLocked && 'hudEditMode' in w ? { hudEditMode: false } : {}),
+            }
+          }
+          return w
+        }),
       }))
     },
 
@@ -273,7 +281,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     lockAll: (locked) => {
       pushHistory()
       set((state) => ({
-        widgets: state.widgets.map((w) => ({ ...w, locked })),
+        widgets: state.widgets.map((w) => ({
+          ...w,
+          locked,
+          ...(locked && 'hudEditMode' in w ? { hudEditMode: false } : {}),
+        })),
         selectedId: locked ? null : state.selectedId,
       }))
       useToastStore.getState().showToast({

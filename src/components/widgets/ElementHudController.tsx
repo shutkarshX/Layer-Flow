@@ -23,6 +23,7 @@ export function HudElementWrapper({
   onSelect,
   onMove,
   className = '',
+  locked = false,
 }: {
   elementKey: WidgetElementKey
   label: string
@@ -33,12 +34,14 @@ export function HudElementWrapper({
   onSelect?: (key: WidgetElementKey) => void
   onMove?: (key: WidgetElementKey, newX: number, newY: number) => void
   className?: string
+  locked?: boolean
 }) {
+  const isEnabled = Boolean(hudEditMode && !locked)
   const transform = hudLayout?.[elementKey] || { x: 0, y: 0, scale: 1.0 }
-  const isSelected = selectedElement === elementKey && hudEditMode
+  const isSelected = selectedElement === elementKey && isEnabled
 
   const handlePointerDown = (e: ReactPointerEvent) => {
-    if (!hudEditMode) return
+    if (!isEnabled) return
     e.stopPropagation()
     e.preventDefault()
     onSelect?.(elementKey)
@@ -72,11 +75,11 @@ export function HudElementWrapper({
   return (
     <div
       style={hudStyle}
-      onPointerDown={hudEditMode ? handlePointerDown : undefined}
+      onPointerDown={isEnabled ? handlePointerDown : undefined}
       className={cn(
         className,
         'transition-transform duration-75',
-        hudEditMode && 'cursor-grab active:cursor-grabbing select-none relative',
+        isEnabled && 'cursor-grab active:cursor-grabbing select-none relative',
         isSelected &&
           'ring-2 ring-cyan-400 ring-offset-2 ring-offset-black/50 rounded-lg shadow-[0_0_14px_rgba(34,211,238,0.45)]'
       )}

@@ -33,8 +33,9 @@ mod imp {
     use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
     use windows::Win32::Media::Audio::{
         eCapture, eConsole, eRender, EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator,
-        DEVICE_STATE_ACTIVE, IAudioMeterInformation,
+        DEVICE_STATE_ACTIVE,
     };
+    use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
     use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
@@ -412,7 +413,7 @@ mod imp {
                         }
                     }
 
-                    let peak = if let Some(m) = &meter_opt {
+                    let peak: f32 = if let Some(m) = &meter_opt {
                         unsafe {
                             match m.GetPeakValue() {
                                 Ok(p) => p,
@@ -463,9 +464,11 @@ pub fn set_session_volume(id: &str, level: f32) -> bool {
 pub fn set_session_mute(id: &str, muted: bool) -> bool {
     imp::set_session_mute(id, muted)
 }
+#[cfg(target_os = "windows")]
 pub fn get_audio_peak() -> f32 {
     imp::get_audio_peak()
 }
+#[cfg(target_os = "windows")]
 pub fn start_audio_meter(app: tauri::AppHandle) {
     imp::start_audio_meter(app);
 }
@@ -490,9 +493,11 @@ pub fn set_session_volume(_id: &str, _level: f32) -> bool {
 pub fn set_session_mute(_id: &str, _muted: bool) -> bool {
     false
 }
+#[cfg(not(target_os = "windows"))]
 pub fn get_audio_peak() -> f32 {
     0.0
 }
+#[cfg(not(target_os = "windows"))]
 pub fn start_audio_meter(_app: tauri::AppHandle) {}
 
 

@@ -3028,6 +3028,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
   const lastLoopToggleTimeRef = useRef<number>(0)
   const lastLoopSeekTimeRef = useRef<number>(0)
   const lastTrackKeyRef = useRef<string>('')
+  const lastPolledPosRef = useRef<number>(-1)
   const [discoveredThumb, setDiscoveredThumb] = useState<string | null>(null)
   const lastSeekTimeRef = useRef<number>(0)
   const liveAudioPeakRef = useRef<number>(0)
@@ -3039,6 +3040,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
 
   const handleSeek = (time: number) => {
     lastSeekTimeRef.current = performance.now()
+    lastPolledPosRef.current = time
     lastSyncRef.current = {
       pos: time,
       time: performance.now(),
@@ -3211,6 +3213,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
 
         if (trackChanged) {
           lastSeekTimeRef.current = 0
+          lastPolledPosRef.current = np.position || 0
           lastSyncRef.current = {
             pos: np.position || 0,
             time: performance.now(),
@@ -3224,12 +3227,30 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
           }
 
           const isRecentlySeeked = performance.now() - lastSeekTimeRef.current < 2000
-          const closeEnough = Math.abs((np.position || 0) - lastSyncRef.current.pos) < 1.0
-          if (!isRecentlySeeked || closeEnough) {
-            lastSyncRef.current = {
-              pos: np.position || 0,
-              time: performance.now(),
-              playing: np.playing,
+          const posChanged = Math.abs((np.position || 0) - lastPolledPosRef.current) > 0.05
+          lastPolledPosRef.current = np.position || 0
+
+          // Smooth lockstep: do NOT overwrite active running interpolation with stale static OS readings
+          // (Browsers like Chrome do not increment SMTC Position continuously every second).
+          // Only sync from OS if:
+          // 1. Not in seek debounce window, AND
+          // 2. Either playback is paused (static exact pause position), OR
+          // 3. User seeked in player or unpaused causing real position jump (> 2.0s drift from interpolation)
+          if (!isRecentlySeeked) {
+            const currentEstimated =
+              lastSyncRef.current.pos +
+              (lastSyncRef.current.playing ? (performance.now() - lastSyncRef.current.time) / 1000 : 0)
+            const drift = Math.abs((np.position || 0) - currentEstimated)
+
+            if (!np.playing || (posChanged && drift > 2.0)) {
+              lastSyncRef.current = {
+                pos: np.position || 0,
+                time: performance.now(),
+                playing: np.playing,
+              }
+              setLivePos(np.position || 0)
+            } else {
+              lastSyncRef.current.playing = np.playing
             }
           }
 

@@ -1,63 +1,14 @@
 name: Release
 
-# Push a version tag to build the installers and publish them to Layer's own
-# GitHub release (the primary, human-facing home) AND mirror the same assets
-# to Layer-releases — kept forever because every already-installed copy of
-# Layer has that URL baked into its updater endpoint at compile time.
-#   npm version patch   (or: edit versions, then `git tag v1.2.0`)
-#   git push --follow-tags
-
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 jobs:
-  # Native ARM64 build on an ARM Windows runner. Allowed to fail: if the runner
-  # is unavailable or the build breaks, the x64 release below still ships (it
-  # just won't include the ARM64 artifact this time).
-  build-arm64:
-    runs-on: windows-11-arm
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-          key: arm64
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build Layer (signed, ARM64)
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri build
-
-      - name: Upload ARM64 installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: arm64-installer
-          path: src-tauri/target/release/bundle/nsis/*-setup.exe*
-          if-no-files-found: error
-
   release:
-    needs: build-arm64
     runs-on: windows-latest
-    # Needed to create the GitHub release on this repo (default GH_TOKEN) and
-    # to push the CHANGELOG.md commit.
     permissions:
       contents: write
     steps:
@@ -80,14 +31,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Never ship a regex that can freeze the app on user text (see
-      # scripts/check-regex.mjs).
       - name: Regex safety (ReDoS)
         run: npm run check:regex
 
-      # Strip the instructional HTML comment from RELEASE_NOTES.md and reuse
-      # the cleaned text everywhere: GitHub release body, in-app updater notes,
-      # and the announcement email.
       - name: Prepare release notes
         id: notes
         shell: pwsh
@@ -102,10 +48,6 @@ jobs:
           "RELEASE_NOTES<<NOTES_EOF" | Add-Content $env:GITHUB_ENV
           $clean                     | Add-Content $env:GITHUB_ENV
           "NOTES_EOF"                | Add-Content $env:GITHUB_ENV
-          # Release notes can opt out of the subscriber email with a
-          # <!-- skip-email --> marker (handy for small patch releases).
-          $announce = if ($raw -match '(?i)skip-email') { 'false' } else { 'true' }
-          "announce=$announce" | Add-Content $env:GITHUB_OUTPUT
 
       - name: Build Layer (signed)
         env:
@@ -113,140 +55,23 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build
 
-      # Pull the ARM64 installer from the build-arm64 job. Best effort — if that
-      # job failed/was skipped, the release continues x64-only.
-      - name: Download ARM64 installer
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: arm64-installer
-          path: arm64-dist
-
       - name: Generate update manifest
-        run: node scripts/make-latest-json.mjs ${{ github.ref_name }} arm64-dist
+        run: node scripts/make-latest-json.mjs ${{ github.ref_name }} "" latest.json ${{ github.repository }}
 
-      - name: Publish release to Layer-releases
+      - name: Publish release to GitHub
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
           $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe |
             Select-Object -First 1
-          # Stable-named copy so the website can always link to the latest build.
           Copy-Item $exe.FullName "Layer-Setup.exe"
           $assets = @(
             "$($exe.FullName)#Layer installer x64 (versioned)",
             "Layer-Setup.exe#Layer installer",
             "latest.json"
           )
-          # Include the ARM64 installer if the ARM job produced one.
-          $arm = Get-ChildItem arm64-dist/*-setup.exe -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if ($arm) {
-            Copy-Item $arm.FullName "Layer-Setup-arm64.exe"
-            $assets += "$($arm.FullName)#Layer installer ARM64 (versioned)"
-            $assets += "Layer-Setup-arm64.exe#Layer installer (ARM64)"
-            Write-Host "Including ARM64 installer: $($arm.Name)"
-          } else {
-            Write-Host "No ARM64 installer this run — publishing x64 only."
-          }
           gh release create ${{ github.ref_name }} @assets `
-            --repo Haris357/Layer-releases `
+            --repo ${{ github.repository }} `
             --title "Layer ${{ github.ref_name }}" `
             --notes-file notes.md
-
-      # Layer (the source repo) is public now, so it's the primary place
-      # people download from and where the in-app updater checks first — see
-      # tauri.conf.json's updater.endpoints. Layer-releases above is kept
-      # forever purely because every already-installed copy of Layer has that
-      # URL baked into its updater endpoint at compile time and can never be
-      # pointed elsewhere remotely; publishing there never stops. This step
-      # mirrors the exact same assets into Layer itself, with a manifest whose
-      # download URLs point at Layer's own release instead.
-      - name: Publish release to Layer
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
-        run: |
-          node scripts/make-latest-json.mjs ${{ github.ref_name }} arm64-dist latest.json Haris357/Layer
-
-          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe |
-            Select-Object -First 1
-          $assets = @(
-            "$($exe.FullName)#Layer installer x64 (versioned)",
-            "Layer-Setup.exe#Layer installer",
-            "latest.json"
-          )
-          $arm = Get-ChildItem arm64-dist/*-setup.exe -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if ($arm) {
-            $assets += "$($arm.FullName)#Layer installer ARM64 (versioned)"
-            $assets += "Layer-Setup-arm64.exe#Layer installer (ARM64)"
-          }
-          gh release create ${{ github.ref_name }} @assets `
-            --repo Haris357/Layer `
-            --title "Layer ${{ github.ref_name }}" `
-            --notes-file notes.md
-
-      # Prepend this release's notes to CHANGELOG.md in THIS repo — Layer is
-      # the public, human-facing home now, so its own changelog is what people
-      # actually read. Best effort: the release is already published, so a
-      # hiccup here doesn't fail it.
-      - name: Update CHANGELOG.md
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $notes = (Get-Content notes.md -Raw) -replace "`r", ""
-          $lines = $notes -split "`n"
-          $title = (($lines | Where-Object { $_ -match '^\s*##\s+' } | Select-Object -First 1) -replace '^\s*##\s+', '').Trim()
-          $bullets = ($lines | Where-Object { $_ -match '^\s*-\s+' }) -join "`n"
-          $entry = "### $tag — $title`n$bullets`n"
-
-          # The checkout at the top of this job is a detached HEAD at the
-          # pushed tag, which may be stale relative to main's current tip by
-          # the time this step runs. Rather than reason about this shallow
-          # checkout's exact refspec/detached state, clone fresh into a
-          # subdirectory — the same proven-safe pattern this workflow already
-          # used for years to push Layer-releases' changelog — so the push is
-          # always a clean fast-forward off main's true current tip.
-          git clone "https://x-access-token:$env:GH_TOKEN@github.com/${{ github.repository }}.git" changelog-repo
-          $path = "changelog-repo/CHANGELOG.md"
-          $doc = if (Test-Path $path) { Get-Content $path -Raw } else { "# Changelog`n" }
-          if ($doc -match [regex]::Escape("### $tag ")) {
-            Write-Host "CHANGELOG.md already has $tag — skipping."
-          } else {
-            $anchor = "# Changelog"
-            $doc = if ($doc.Contains($anchor)) {
-              $doc.Replace($anchor, "$anchor`n`n$entry")
-            } else {
-              "$anchor`n`n$entry`n$doc"
-            }
-            Set-Content -Path $path -Value $doc -Encoding utf8 -NoNewline
-            Push-Location changelog-repo
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add CHANGELOG.md
-            git commit -m "Changelog: $tag"
-            git push
-            Pop-Location
-            Write-Host "CHANGELOG.md updated for $tag."
-          }
-
-      # Tell everyone on the download list about the new version. Best effort —
-      # a mail hiccup won't mark the release failed (it's already published).
-      - name: Install announcement deps
-        if: steps.notes.outputs.announce != 'false'
-        working-directory: scripts
-        run: npm install --no-audit --no-fund
-
-      - name: Announce release to subscribers
-        if: steps.notes.outputs.announce != 'false'
-        continue-on-error: true
-        env:
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-        run: node scripts/announce.mjs ${{ github.ref_name }} notes.md

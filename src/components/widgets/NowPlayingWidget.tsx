@@ -3075,8 +3075,8 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
       setDiscoveredThumb(null)
       return
     }
-    if (session.thumb && session.thumb.length > 0) {
-      setDiscoveredThumb(null)
+    const isPlaceholder = !session.thumb || session.thumb.length < 3500
+    if (!isPlaceholder && session.thumb.length > 0) {
       return
     }
     let cancelled = false
@@ -3407,7 +3407,8 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     }
   }, [playbackPos, lyrics])
 
-  const resolvedThumb = (session?.thumb && session.thumb.length > 0 ? session.thumb : discoveredThumb) || ''
+  const isLikelyPlaceholder = Boolean(session?.thumb && session.thumb.length < 3500)
+  const resolvedThumb = (!isLikelyPlaceholder && session?.thumb && session.thumb.length > 0 ? session.thumb : (discoveredThumb || session?.thumb)) || ''
 
   const np = session ?? {
     hasSession: true,
@@ -3419,7 +3420,7 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
     position: 0,
     duration: currentMock.duration,
   }
-  const artRgb = useArtColor(np.thumb)
+  const artRgb = useArtColor(resolvedThumb || np.thumb)
   const volume = vol
 
   const visualizerTheme = widget.visualizerTheme || 'songAdaptive'

@@ -850,6 +850,14 @@ fn smtc() -> &'static Smtc {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Default)]
+struct ThumbCache {
+    key: String,
+    art: String,
+    retries_left: u8,
+}
+
+#[cfg(target_os = "windows")]
 fn media_thread(
     np: std::sync::Arc<std::sync::Mutex<NowPlaying>>,
     rx: std::sync::mpsc::Receiver<Cmd>,
@@ -872,7 +880,7 @@ fn media_thread(
     let mut fails = 0u32;
     // Cache the decoded album art keyed by "title|artist" so we only read the
     // thumbnail stream when the track actually changes (read_session runs ~1×/s).
-    let mut thumb_cache: (String, String) = (String::new(), String::new());
+    let mut thumb_cache = ThumbCache::default();
     // When a command was applied at the bottom of the previous iteration, skip
     // the album-art read on the next snapshot so back-to-back presses stay fast.
     let mut skip_thumb_next = false;
@@ -938,7 +946,7 @@ fn media_thread(
 #[cfg(target_os = "windows")]
 fn read_session(
     mgr: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager,
-    thumb_cache: &mut (String, String),
+    thumb_cache: &mut ThumbCache,
     skip_thumb: bool,
 ) -> windows::core::Result<NowPlaying> {
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status;
@@ -995,16 +1003,31 @@ fn read_session(
             np.duration = e.Duration as f64 / 10_000_000.0;
         }
     }
-    // Album art: only re-read the thumbnail stream when the track changes.
+    // Album art: re-read when track changes, and retry across several ticks to allow
+    // delayed thumbnail streams (e.g. YouTube buffering in Chrome) to settle.
     let key = format!("{}|{}", np.title, np.artist);
-    if !skip_thumb && key != thumb_cache.0 {
-        thumb_cache.0 = key;
-        thumb_cache.1 = props_opt
-            .as_ref()
-            .and_then(read_thumb)
-            .unwrap_or_default();
+    if !key.is_empty() && key != thumb_cache.key {
+        thumb_cache.key = key;
+        thumb_cache.retries_left = 8;
+        if !skip_thumb {
+            thumb_cache.art = props_opt
+                .as_ref()
+                .and_then(read_thumb)
+                .unwrap_or_default();
+        } else {
+            thumb_cache.art.clear();
+        }
+    } else if !skip_thumb && (thumb_cache.retries_left > 0 || thumb_cache.art.is_empty()) {
+        if thumb_cache.retries_left > 0 {
+            thumb_cache.retries_left -= 1;
+        }
+        if let Some(new_art) = props_opt.as_ref().and_then(read_thumb) {
+            if !new_art.is_empty() && (thumb_cache.art.is_empty() || new_art != thumb_cache.art) {
+                thumb_cache.art = new_art;
+            }
+        }
     }
-    np.thumb = thumb_cache.1.clone();
+    np.thumb = thumb_cache.art.clone();
     Ok(np)
 }
 

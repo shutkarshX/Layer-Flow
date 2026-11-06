@@ -105,6 +105,9 @@ pub fn run() {
                         Some("toggle") => {
                             let _ = app.emit("toggle-mode", ());
                         }
+                        Some("quit") => {
+                            std::process::exit(0);
+                        }
                         _ => {}
                     }
                 })

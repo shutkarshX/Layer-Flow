@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { isTauri, setHitRegions } from '../lib/ipc'
+import { useVisibilityStore } from '../store/visibilityStore'
 
 const PAD = 10
 
@@ -9,6 +10,13 @@ export function useHitRegions(): void {
     let last = ''
 
     const sync = () => {
+      if (!useVisibilityStore.getState().visible) {
+        if (last !== '[]') {
+          last = '[]'
+          setHitRegions([]).catch(() => {})
+        }
+        return
+      }
       const dpr = window.devicePixelRatio || 1
       const els = document.querySelectorAll<HTMLElement>('[data-hit]')
       const regions: number[][] = []

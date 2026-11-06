@@ -197,10 +197,113 @@ export interface SearchWidget extends BaseWidget {
   customUrl?: string
 }
 
+export type VisualizerType =
+  | 'waveform'
+  | 'bars'
+  | 'wave'
+  | 'radial'
+  | 'halo'
+  | 'vu'
+  | 'plasma'
+  | 'pulse'
+  | 'dots'
+  | 'none'
+export type ProgressBarStyle = 'always' | 'hover' | 'hidden'
+export type LyricsStyle =
+  | 'venom'
+  | 'songAdaptive'
+  | 'wallpaper'
+  | 'chrome'
+  | 'neon'
+  | 'fire'
+  | 'clean'
+  | 'off'
+
+export type VisualizerTheme =
+  | 'songAdaptive'
+  | 'wallpaper'
+  | 'accent'
+  | 'white'
+  | 'cyan'
+  | 'orange'
+
+export type VolumeStyle =
+  | 'hover'
+  | 'bar'
+  | 'knob'
+  | 'fader'
+  | 'stepped'
+  | 'arc'
+  | 'pill'
+  | 'hidden'
+
+export type ArtDesign = 'square' | 'circle' | 'cd' | 'turntable'
+export type ArtLayout = 'left' | 'right' | 'hero' | 'split' | 'hidden' | 'cover'
+export type LayoutSizing = 'fluid' | 'fixed'
+
+export type ControlsLayout =
+  | 'bottom-right'
+  | 'bottom-center'
+  | 'bottom-left'
+  | 'top-right'
+  | 'hidden'
+
+export type InfoAlignment = 'left' | 'center' | 'right'
+export type InfoTypography = 'modern' | 'mono' | 'serif' | 'allcaps'
+export type InfoDensity = 'stacked' | 'inline' | 'badges' | 'hidden'
+
+export type WidgetElementKey =
+  | 'artwork'
+  | 'info'
+  | 'controls'
+  | 'scrubber'
+  | 'volume'
+  | 'visualizer'
+  | 'lyrics'
+  | 'source'
+  | 'karaoke'
+
+export interface ElementHudTransform {
+  x: number
+  y: number
+  scale?: number
+  padding?: number
+}
+
+export type WidgetHudLayout = Partial<Record<WidgetElementKey, ElementHudTransform>>
+
 export interface NowPlayingWidget extends BaseWidget {
   type: 'nowplaying'
-  // Blur the album art behind the player with a matching color wash (default on).
   artBackground?: boolean
+  preset?: 'compact' | 'hero' | 'classic' | 'transparent' | 'custom'
+  visualizerTheme?: VisualizerTheme
+  volumeStyle?: VolumeStyle
+  artDesign?: ArtDesign
+  artLayout?: ArtLayout
+  layoutSizing?: LayoutSizing
+  controlsLayout?: ControlsLayout
+  backgroundStyle?: 'glass' | 'solid' | 'transparent' | 'cover'
+  infoAlignment?: InfoAlignment
+  infoTypography?: InfoTypography
+  infoDensity?: InfoDensity
+  showArtist?: boolean
+  showSourceHeader?: boolean
+  showKaraokeButton?: boolean
+  cardPadding?: 'compact' | 'normal' | 'relaxed'
+  elementGap?: 'tight' | 'normal' | 'relaxed'
+  marqueeScroll?: boolean
+  adaptiveArtRatio?: boolean
+  showLoop?: boolean
+  buttonSize?: 'compact' | 'large'
+  progressBarStyle?: ProgressBarStyle
+  visualizerType?: VisualizerType
+  lyricsStyle?: LyricsStyle
+  customLrc?: string
+  autoFetchYoutubeCaptions?: boolean
+  youtubeVideoId?: string
+  hudLayout?: WidgetHudLayout
+  hudEditMode?: boolean
+  hudSelectedElement?: WidgetElementKey
 }
 
 export interface NotificationsWidget extends BaseWidget {

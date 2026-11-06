@@ -1,3 +1,5 @@
+import { useSettingsStore } from '../store/settingsStore'
+import { quitApp } from '../lib/ipc'
 import { useEffect } from 'react'
 import { useCanvasStore } from '../store/canvasStore'
 
@@ -21,6 +23,26 @@ export function useKeyboardShortcuts(): void {
       }
 
       if (isTyping(e.target)) return
+
+      // Global quit shortcut check
+      const quitCfg = useSettingsStore.getState().secondaryShortcuts?.quit
+      if (quitCfg?.enabled && quitCfg.accelerator) {
+        const parts = quitCfg.accelerator.toLowerCase().split('+').map((p) => p.trim())
+        const needCtrl = parts.includes('ctrl') || parts.includes('cmdorcontrol') || parts.includes('control')
+        const needShift = parts.includes('shift')
+        const needAlt = parts.includes('alt')
+        const keyPart = parts.find((p) => !['ctrl', 'cmdorcontrol', 'control', 'shift', 'alt', 'super', 'meta'].includes(p))
+        const hasCtrl = e.ctrlKey || e.metaKey
+        const hasShift = e.shiftKey
+        const hasAlt = e.altKey
+        const actualKey = (e.key === ' ' ? 'space' : e.key).toLowerCase()
+        if (hasCtrl === needCtrl && hasShift === needShift && hasAlt === needAlt && keyPart && actualKey === keyPart) {
+          e.preventDefault()
+          quitApp().catch(() => {})
+          return
+        }
+      }
+
 
       const ctrl = e.ctrlKey || e.metaKey
       const k = e.key.toLowerCase()

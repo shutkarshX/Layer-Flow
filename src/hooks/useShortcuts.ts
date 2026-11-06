@@ -15,6 +15,7 @@ export function buildShortcuts(
     { action: 'screensaver', ...secondary.screensaver },
     { action: 'cycle', ...secondary.cycle },
     { action: 'hideAll', ...secondary.hideAll },
+    { action: 'quit', ...secondary.quit },
   ]
 }
 

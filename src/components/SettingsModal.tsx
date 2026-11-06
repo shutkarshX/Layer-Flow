@@ -132,6 +132,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const setScreensaverEnabled = useSettingsStore((s) => s.setScreensaverEnabled)
   const setWallpaperAccent = useSettingsStore((s) => s.setWallpaperAccent)
   const setHotCorner = useSettingsStore((s) => s.setHotCorner)
+  const showTopIslandHandle = useSettingsStore((s) => s.showTopIslandHandle)
+  const setShowTopIslandHandle = useSettingsStore((s) => s.setShowTopIslandHandle)
   const wallpaperLoading = useThemeStatus((s) => s.wallpaperLoading)
   const resetSpace = useCanvasStore((s) => s.resetSpace)
   const activeId = useCanvasStore((s) => s.activeId)
@@ -383,6 +385,23 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 />
               </div>
 
+              <div className="flex flex-col gap-2 pt-2 border-t border-[var(--border)]">
+                <SectionTitle>Power & Performance</SectionTitle>
+                <div className="flex items-center justify-between">
+                  <div className="flex flex-col">
+                    <span className="text-[13px] font-medium text-[var(--text-primary)]">Quit Layer</span>
+                    <span className="text-[11.5px] text-[var(--text-tertiary)]">Completely exit and close the application to free all RAM and CPU</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => quitApp().catch(() => {})}
+                    className="rounded-[8px] border border-[var(--danger)] bg-transparent px-3 py-1.5 text-[12px] font-semibold text-[var(--danger)] transition-colors hover:bg-[var(--danger)] hover:text-white"
+                  >
+                    Quit App
+                  </button>
+                </div>
+              </div>
+
               <div className="flex flex-col gap-2">
                 <SectionTitle>{t('settings.general.canvas')}</SectionTitle>
                 <button
@@ -421,6 +440,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   onChange={(v) => setTheme(v as 'light' | 'dark' | 'system')}
                 />
               </div>
+              <FieldRow label="Always Show Top Toolbar Pill">
+                <Toggle
+                  checked={showTopIslandHandle}
+                  onChange={setShowTopIslandHandle}
+                />
+              </FieldRow>
               <FieldRow label={t('settings.appearance.matchWallpaper')}>
                 <div className="flex items-center gap-2">
                   {wallpaperLoading && (
@@ -575,6 +600,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   ['cycle', 'cycleSpaces'],
                   ['screensaver', 'previewScreensaver'],
                   ['hideAll', 'hideEverything'],
+                  ['quit', 'quitApp'],
                 ] as [SecondaryShortcut, string][]
               ).map(([action, labelKey]) => {
                 const cfg = secondaryShortcuts[action]
@@ -583,9 +609,16 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     key={action}
                     className="flex items-center justify-between border-b border-[var(--border)] py-2.5"
                   >
-                    <span className="text-[13px] text-[var(--text-primary)]">
-                      {t(`settings.shortcuts.${labelKey}`)}
-                    </span>
+                    <div className="flex flex-col">
+                      <span className="text-[13px] text-[var(--text-primary)]">
+                        {t(`settings.shortcuts.${labelKey}`)}
+                      </span>
+                      {action === 'hideAll' && (
+                        <span className="text-[11px] text-[var(--text-tertiary)]">
+                          Switches Layer off to drop CPU to 0% and free RAM for gaming or heavy apps
+                        </span>
+                      )}
+                    </div>
                     <div className="flex items-center gap-2">
                       <button
                         type="button"

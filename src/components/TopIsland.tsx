@@ -13,6 +13,8 @@ import { listen } from '@tauri-apps/api/event'
 import {
   Layers,
   Settings as SettingsIcon,
+  Power,
+  Moon,
   LayoutTemplate,
   Lock,
   LockOpen,
@@ -30,6 +32,8 @@ import { useSettingsStore } from '../store/settingsStore'
 import { useToastStore } from '../store/toastStore'
 import { useAnchorMonitor } from '../store/monitorStore'
 import { useNotificationStore } from '../store/notificationStore'
+import { quitApp } from '../lib/ipc'
+import { useVisibilityStore } from '../store/visibilityStore'
 import { notify } from '../lib/notify'
 import { getUpdate } from '../lib/updater'
 import { widgetList, type WidgetDefinition } from '../lib/widgetRegistry'
@@ -421,6 +425,7 @@ export function TopIsland() {
   const toast = useToastStore((s) => s.show)
   const snapEnabled = useSettingsStore((s) => s.snapEnabled)
   const gridSize = useSettingsStore((s) => s.gridSize)
+  const showTopIslandHandle = useSettingsStore((s) => s.showTopIslandHandle)
   const primary = useAnchorMonitor()
   // Whole bar ≈ 85% of the screen it sits on; ~330px of that is the fixed
   // buttons (close, lock, backgrounds, reset, spaces, notifications,
@@ -567,9 +572,10 @@ export function TopIsland() {
   return (
     <>
       <div
-        data-hit
+        data-hit={showTopIslandHandle === false && !down ? undefined : ''}
         className="fixed z-[5000] -translate-x-1/2"
         style={{
+          pointerEvents: showTopIslandHandle === false && !down ? 'none' : undefined,
           height: 60,
           // Anchor to the primary monitor's top-centre so the dock always sits
           // on a real screen — not the centre of the combined virtual desktop,
@@ -585,7 +591,10 @@ export function TopIsland() {
         onMouseLeave={handleLeave}
       >
         <motion.div
-          animate={{ y: down ? 0 : -40 }}
+          animate={{
+          y: down ? 0 : showTopIslandHandle === false ? -75 : -40,
+          opacity: !down && showTopIslandHandle === false ? 0 : 1,
+        }}
           transition={spring}
         >
           <motion.div
@@ -780,6 +789,22 @@ export function TopIsland() {
                     onClick={() => setShowSettings(true)}
                   >
                     <SettingsIcon size={18} strokeWidth={1.5} />
+                  </ToolButton>
+                  <motion.div variants={dividerVariants} className="mx-0.5 h-6 w-px shrink-0 bg-[var(--border)]" />
+                  <ToolButton
+                    index={widgetList.length + 6}
+                    label="Sleep Mode (0% CPU & Free RAM)"
+                    onClick={() => useVisibilityStore.getState().setVisible(false)}
+                  >
+                    <Moon size={18} strokeWidth={1.5} />
+                  </ToolButton>
+                  <ToolButton
+                    index={widgetList.length + 7}
+                    danger
+                    label="Quit Layer completely"
+                    onClick={() => quitApp().catch(() => {})}
+                  >
+                    <Power size={18} strokeWidth={1.5} />
                   </ToolButton>
                 </motion.div>
               )}

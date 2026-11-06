@@ -7,7 +7,7 @@ export type ScreensaverTheme = 'ambient' | 'minimal' | 'quote'
 // The remappable/disable-able secondary global shortcuts. The main edit-mode
 // toggle stays in `hotkey`. Each of these can be rebound or turned off so it
 // doesn't clash with other apps (e.g. Ctrl+Shift+S vs "Save As").
-export type SecondaryShortcut = 'capture' | 'screensaver' | 'cycle' | 'hideAll'
+export type SecondaryShortcut = 'capture' | 'screensaver' | 'cycle' | 'hideAll' | 'quit'
 export interface ShortcutSetting {
   accelerator: string
   enabled: boolean
@@ -38,6 +38,7 @@ interface SettingsState {
   screensaverTheme: ScreensaverTheme
   wallpaperAccent: boolean
   hotCorner: boolean
+  showTopIslandHandle: boolean
   // Which monitor the pill + modals anchor to. -1 = auto (primary monitor).
   uiMonitor: number
   onboarded: boolean
@@ -62,6 +63,7 @@ interface SettingsState {
   setScreensaverTheme: (value: ScreensaverTheme) => void
   setWallpaperAccent: (value: boolean) => void
   setHotCorner: (value: boolean) => void
+  setShowTopIslandHandle: (value: boolean) => void
   setUiMonitor: (value: number) => void
   setOnboarded: (value: boolean) => void
   setNotchEnabled: (value: boolean) => void
@@ -81,6 +83,7 @@ export const useSettingsStore = create<SettingsState>()(
         screensaver: { accelerator: 'Ctrl+Shift+S', enabled: true },
         cycle: { accelerator: 'Ctrl+Shift+E', enabled: true },
         hideAll: { accelerator: 'Ctrl+Shift+H', enabled: true },
+        quit: { accelerator: 'Ctrl+Shift+Q', enabled: true },
       },
       shortcutsEverywhere: false,
       monitorSpaceMap: {},
@@ -91,6 +94,7 @@ export const useSettingsStore = create<SettingsState>()(
       screensaverTheme: 'ambient',
       wallpaperAccent: false,
       hotCorner: false,
+      showTopIslandHandle: true,
       uiMonitor: -1,
       onboarded: false,
       notchEnabled: false,
@@ -120,6 +124,7 @@ export const useSettingsStore = create<SettingsState>()(
       setScreensaverTheme: (screensaverTheme) => set({ screensaverTheme }),
       setWallpaperAccent: (wallpaperAccent) => set({ wallpaperAccent }),
       setHotCorner: (hotCorner) => set({ hotCorner }),
+      setShowTopIslandHandle: (showTopIslandHandle) => set({ showTopIslandHandle }),
       setUiMonitor: (uiMonitor) => set({ uiMonitor }),
       setOnboarded: (onboarded) => set({ onboarded }),
       setNotchEnabled: (notchEnabled) => set({ notchEnabled }),

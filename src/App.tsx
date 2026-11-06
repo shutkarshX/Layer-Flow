@@ -1,3 +1,6 @@
+import { useEffect } from 'react'
+import { listen } from '@tauri-apps/api/event'
+import { isTauri } from './lib/ipc'
 import { Canvas } from './components/Canvas'
 import { TopIsland } from './components/TopIsland'
 import { CommandPalette } from './components/CommandPalette'
@@ -53,6 +56,17 @@ export default function App() {
   useMonitors()
   useMonitorProfiles()
   useHideAll()
+  useEffect(() => {
+    if (!isTauri()) return
+    const unlisten = listen('toggle-mode', () => {
+      if (!useVisibilityStore.getState().visible) {
+        useVisibilityStore.getState().setVisible(true)
+      }
+    })
+    return () => {
+      unlisten.then((fn) => fn()).catch(() => {})
+    }
+  }, [])
 
   const onboarded = useSettingsStore((s) => s.onboarded)
   const visible = useVisibilityStore((s) => s.visible)
@@ -64,7 +78,7 @@ export default function App() {
           interactive regions to Rust, making the whole app click-through
           while hidden, with no extra wiring needed. */}
       <div style={{ display: visible ? 'contents' : 'none' }}>
-        <Canvas />
+        {visible && <Canvas />}
         <TopIsland />
         <CommandPalette />
         <QuickCaptureModal />

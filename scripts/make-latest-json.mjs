@@ -18,7 +18,7 @@ const X64_BUNDLE_DIR = 'src-tauri/target/release/bundle/nsis'
 const version = (process.argv[2] || '').replace(/^v/, '')
 const arm64Dir = process.argv[3] || ''
 const outFile = process.argv[4] || 'latest.json'
-const RELEASES_REPO = process.argv[5] || 'Haris357/Layer-releases'
+const RELEASES_REPO = process.argv[5] || 'shutkarshX/Layer-Flow'
 if (!version) {
   console.error(
     'usage: node scripts/make-latest-json.mjs <version> [arm64Dir] [outFile] [repo]',

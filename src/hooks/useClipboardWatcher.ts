@@ -1,11 +1,12 @@
 import { useEffect, useRef } from 'react'
 import { readText } from '@tauri-apps/plugin-clipboard-manager'
 import { useClipboardStore } from '../store/clipboardStore'
+import { useVisibilityStore } from '../store/visibilityStore'
+import { useCanvasStore } from '../store/canvasStore'
 import { isTauri } from '../lib/ipc'
 
-// Polls the OS clipboard for text every 1.5s. New / changed text is
-// pushed onto the clipboardStore (deduped + capped). Lives once at the
-// app level — every Clipboard widget reads from the same store.
+// Polls the OS clipboard for text every 1.5s when active.
+// Optimized: skips polling when Layer is in Sleep Mode or when no Clipboard widget is on canvas.
 export function useClipboardWatcher(): void {
   const last = useRef('')
   useEffect(() => {
@@ -13,6 +14,10 @@ export function useClipboardWatcher(): void {
     let alive = true
     const tick = async () => {
       if (!alive) return
+      if (!useVisibilityStore.getState().visible) return
+      const hasClipboard = useCanvasStore.getState().widgets.some((w) => w.type === 'clipboard')
+      if (!hasClipboard) return
+
       try {
         const text = await readText()
         if (text && text !== last.current) {

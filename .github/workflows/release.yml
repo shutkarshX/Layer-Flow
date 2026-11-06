@@ -212,7 +212,7 @@ jobs:
           # subdirectory — the same proven-safe pattern this workflow already
           # used for years to push Layer-releases' changelog — so the push is
           # always a clean fast-forward off main's true current tip.
-          git clone "https://x-access-token:$env:GH_TOKEN@github.com/Haris357/Layer.git" changelog-repo
+          git clone "https://x-access-token:$env:GH_TOKEN@github.com/${{ github.repository }}.git" changelog-repo
           $path = "changelog-repo/CHANGELOG.md"
           $doc = if (Test-Path $path) { Get-Content $path -Raw } else { "# Changelog`n" }
           if ($doc -match [regex]::Escape("### $tag ")) {

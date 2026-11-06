@@ -9,10 +9,22 @@ import { isTauri } from '../lib/ipc'
 export function useHideAll(): void {
   const toggle = useVisibilityStore((s) => s.toggle)
 
-  useEffect(() => {
-    if (!isTauri()) return
+    useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'h') {
+        e.preventDefault()
+        toggle()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+
+    if (!isTauri()) {
+      return () => window.removeEventListener('keydown', onKeyDown)
+    }
+
     const unlisten = listen('hide-all', () => toggle())
     return () => {
+      window.removeEventListener('keydown', onKeyDown)
       unlisten.then((fn) => fn()).catch(() => {})
     }
   }, [toggle])

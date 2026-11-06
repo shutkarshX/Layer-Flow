@@ -1,0 +1,749 @@
+import { useState, type CSSProperties, type ReactNode, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  ChevronUp,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Crosshair,
+  Move,
+  RotateCcw,
+} from 'lucide-react'
+import type { Widget, WidgetElementKey, WidgetHudLayout, ElementHudTransform, NowPlayingWidget } from '../../types/widget'
+import { cn } from '../../lib/utils'
+import { Toggle } from '../ui'
+
+// ── 1. Interactive HUD Element Wrapper inside the Widget ──
+export function HudElementWrapper({
+  elementKey,
+  label,
+  children,
+  hudLayout,
+  hudEditMode,
+  selectedElement,
+  onSelect,
+  onMove,
+  className = '',
+}: {
+  elementKey: WidgetElementKey
+  label: string
+  children: ReactNode
+  hudLayout?: WidgetHudLayout
+  hudEditMode?: boolean
+  selectedElement?: WidgetElementKey
+  onSelect?: (key: WidgetElementKey) => void
+  onMove?: (key: WidgetElementKey, newX: number, newY: number) => void
+  className?: string
+}) {
+  const transform = hudLayout?.[elementKey] || { x: 0, y: 0, scale: 1.0 }
+  const isSelected = selectedElement === elementKey && hudEditMode
+
+  const handlePointerDown = (e: ReactPointerEvent) => {
+    if (!hudEditMode) return
+    e.stopPropagation()
+    e.preventDefault()
+    onSelect?.(elementKey)
+
+    const startX = e.clientX
+    const startY = e.clientY
+    const origX = transform.x || 0
+    const origY = transform.y || 0
+
+    const onPointerMove = (me: PointerEvent) => {
+      const dx = me.clientX - startX
+      const dy = me.clientY - startY
+      onMove?.(elementKey, origX + dx, origY + dy)
+    }
+
+    const onPointerUp = () => {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+    }
+
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp)
+  }
+
+  const hudStyle: CSSProperties = {
+    transform: `translate(${transform.x || 0}px, ${transform.y || 0}px) scale(${transform.scale ?? 1.0})`,
+    transformOrigin: 'center center',
+    padding: transform.padding ? `${transform.padding}px` : undefined,
+  }
+
+  return (
+    <div
+      style={hudStyle}
+      onPointerDown={hudEditMode ? handlePointerDown : undefined}
+      className={cn(
+        className,
+        'transition-transform duration-75',
+        hudEditMode && 'cursor-grab active:cursor-grabbing select-none relative',
+        isSelected &&
+          'ring-2 ring-cyan-400 ring-offset-2 ring-offset-black/50 rounded-lg shadow-[0_0_14px_rgba(34,211,238,0.45)]'
+      )}
+    >
+      {isSelected && (
+        <span className="absolute -top-4 left-0 z-30 rounded bg-cyan-500 px-1 py-0.5 text-[8px] font-bold text-black uppercase tracking-wider pointer-events-none shadow">
+          {label}
+        </span>
+      )}
+      {children}
+    </div>
+  )
+}
+
+// ── 2. Element HUD Controller (PUBG Mobile HUD Editor Style) ──
+export function ElementHudController({
+  widget,
+  onUpdate,
+}: {
+  widget: NowPlayingWidget
+  onUpdate: (patch: Partial<NowPlayingWidget>) => void
+}) {
+  const hudLayout = widget.hudLayout || {}
+  const selectedElement = widget.hudSelectedElement || 'controls'
+  const [step, setStep] = useState<number>(5)
+
+  const elements: { key: WidgetElementKey; label: string; icon: string }[] = [
+    { key: 'source', label: 'App Header', icon: '🏷️' },
+    { key: 'karaoke', label: 'Mic Button', icon: '🎤' },
+    { key: 'controls', label: 'Controls', icon: '⏯️' },
+    { key: 'artwork', label: 'Album Art', icon: '🖼️' },
+    { key: 'info', label: 'Track Info', icon: '🎵' },
+    { key: 'scrubber', label: 'Scrubber', icon: '⏱️' },
+    { key: 'volume', label: 'Volume', icon: '🔊' },
+    { key: 'visualizer', label: 'Visualizer', icon: '📊' },
+    { key: 'lyrics', label: 'Lyrics', icon: '📝' },
+  ]
+
+  const currentTransform = hudLayout[selectedElement] || { x: 0, y: 0, scale: 1.0 }
+
+  const updateTransform = (partial: Partial<ElementHudTransform>) => {
+    const updated = {
+      ...hudLayout,
+      [selectedElement]: {
+        ...currentTransform,
+        ...partial,
+      },
+    }
+    onUpdate({ hudLayout: updated, preset: 'custom' })
+  }
+
+  const nudge = (dx: number, dy: number) => {
+    updateTransform({
+      x: (currentTransform.x || 0) + dx,
+      y: (currentTransform.y || 0) + dy,
+    })
+  }
+
+  const resetCurrent = () => {
+    updateTransform({ x: 0, y: 0, scale: 1.0 })
+  }
+
+  const resetAll = () => {
+    onUpdate({ hudLayout: {}, preset: 'custom' })
+  }
+
+  return (
+    <div className="flex w-[285px] flex-col gap-2.5 select-none text-[13px]">
+      {/* ── Element Selector Grid ── */}
+      <div className="flex flex-col gap-1.5 rounded-lg border border-white/10 bg-white/[0.025] p-2.5">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-tertiary)] flex items-center justify-between">
+          <span>Target Element</span>
+          <span className="text-cyan-400 font-semibold">
+            {elements.find((e) => e.key === selectedElement)?.label}
+          </span>
+        </span>
+        <div className="grid grid-cols-4 gap-1">
+          {elements.map((el) => (
+            <button
+              key={el.key}
+              type="button"
+              onClick={() => onUpdate({ hudSelectedElement: el.key })}
+              className={cn(
+                'flex flex-col items-center justify-center gap-0.5 rounded-md border p-1.5 text-center transition-all',
+                selectedElement === el.key
+                  ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200 shadow-[0_0_8px_rgba(34,211,238,0.25)]'
+                  : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10 hover:text-white'
+              )}
+            >
+              <span className="text-sm">{el.icon}</span>
+              <span className="text-[9px] font-medium truncate w-full">{el.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Precise Nudge D-Pad ── */}
+      <div className="flex flex-col items-center gap-2 rounded-lg border border-white/10 bg-white/[0.025] p-3">
+        <div className="flex w-full items-center justify-between">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-tertiary)] flex items-center gap-1.5">
+            <Move size={12} className="text-cyan-400" />
+            Precise Nudge ({elements.find((e) => e.key === selectedElement)?.label})
+          </span>
+          <div className="flex items-center gap-1 rounded bg-black/40 p-0.5 border border-white/10">
+            {[1, 5, 20].map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setStep(s)}
+                className={cn(
+                  'rounded px-1.5 py-0.5 text-[10px] font-mono font-bold transition-colors',
+                  step === s
+                    ? 'bg-cyan-500 text-black'
+                    : 'text-white/60 hover:text-white'
+                )}
+              >
+                {s}px
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* 3x3 Gaming D-Pad Controller */}
+        <div className="relative my-1 flex h-[106px] w-[106px] items-center justify-center rounded-full border border-cyan-400/30 bg-black/50 shadow-[0_0_15px_rgba(34,211,238,0.1)]">
+          <button
+            type="button"
+            onClick={() => nudge(0, -step)}
+            title={`Nudge Up ${step}px`}
+            className="absolute top-1 flex h-8 w-8 items-center justify-center rounded-md bg-white/10 text-white/90 shadow transition-all hover:bg-cyan-400 hover:text-black active:scale-90"
+          >
+            <ChevronUp size={18} />
+          </button>
+          <button
+            type="button"
+            onClick={() => nudge(0, step)}
+            title={`Nudge Down ${step}px`}
+            className="absolute bottom-1 flex h-8 w-8 items-center justify-center rounded-md bg-white/10 text-white/90 shadow transition-all hover:bg-cyan-400 hover:text-black active:scale-90"
+          >
+            <ChevronDown size={18} />
+          </button>
+          <button
+            type="button"
+            onClick={() => nudge(-step, 0)}
+            title={`Nudge Left ${step}px`}
+            className="absolute left-1 flex h-8 w-8 items-center justify-center rounded-md bg-white/10 text-white/90 shadow transition-all hover:bg-cyan-400 hover:text-black active:scale-90"
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <button
+            type="button"
+            onClick={() => nudge(step, 0)}
+            title={`Nudge Right ${step}px`}
+            className="absolute right-1 flex h-8 w-8 items-center justify-center rounded-md bg-white/10 text-white/90 shadow transition-all hover:bg-cyan-400 hover:text-black active:scale-90"
+          >
+            <ChevronRight size={18} />
+          </button>
+          <button
+            type="button"
+            onClick={resetCurrent}
+            title="Reset Element Offset to (0,0)"
+            className="flex h-7 w-7 items-center justify-center rounded-full bg-white/15 text-white/90 transition-all hover:bg-white/30 hover:scale-105 active:scale-95"
+          >
+            <Crosshair size={14} />
+          </button>
+        </div>
+
+        {/* Real-time Coordinate Offset Readout */}
+        <div className="grid w-full grid-cols-2 gap-2 text-center text-[11px]">
+          <div className="flex items-center justify-between rounded-md border border-white/10 bg-black/30 px-2 py-1">
+            <span className="text-cyan-400 font-bold">X</span>
+            <input
+              type="number"
+              value={Math.round(currentTransform.x || 0)}
+              onChange={(e) => {
+                const val = parseInt(e.target.value, 10)
+                if (!isNaN(val)) updateTransform({ x: val })
+              }}
+              className="w-16 bg-transparent text-right font-mono text-white focus:outline-none"
+            />
+            <span className="text-[var(--text-tertiary)] text-[9px] ml-0.5">px</span>
+          </div>
+
+          <div className="flex items-center justify-between rounded-md border border-white/10 bg-black/30 px-2 py-1">
+            <span className="text-cyan-400 font-bold">Y</span>
+            <input
+              type="number"
+              value={Math.round(currentTransform.y || 0)}
+              onChange={(e) => {
+                const val = parseInt(e.target.value, 10)
+                if (!isNaN(val)) updateTransform({ y: val })
+              }}
+              className="w-16 bg-transparent text-right font-mono text-white focus:outline-none"
+            />
+            <span className="text-[var(--text-tertiary)] text-[9px] ml-0.5">px</span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Element Size & Scale ── */}
+      <div className="flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.025] p-2.5">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-tertiary)] flex items-center justify-between">
+          <span>Element Scale</span>
+          <span className="font-mono text-cyan-300 font-bold">
+            {Math.round((currentTransform.scale ?? 1.0) * 100)}%
+          </span>
+        </span>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() =>
+              updateTransform({
+                scale: Math.max(0.4, Math.min(2.0, (currentTransform.scale ?? 1.0) - 0.05)),
+              })
+            }
+            className="flex h-6 w-6 items-center justify-center rounded border border-white/15 bg-white/5 text-white/80 hover:bg-white/15 active:scale-95"
+          >
+            -
+          </button>
+          <input
+            type="range"
+            min={0.5}
+            max={1.8}
+            step={0.02}
+            value={currentTransform.scale ?? 1.0}
+            onChange={(e) => updateTransform({ scale: parseFloat(e.target.value) })}
+            className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/20 accent-cyan-400"
+          />
+          <button
+            type="button"
+            onClick={() =>
+              updateTransform({
+                scale: Math.max(0.4, Math.min(2.0, (currentTransform.scale ?? 1.0) + 0.05)),
+              })
+            }
+            className="flex h-6 w-6 items-center justify-center rounded border border-white/15 bg-white/5 text-white/80 hover:bg-white/15 active:scale-95"
+          >
+            +
+          </button>
+        </div>
+
+        {/* Quick Scale Presets */}
+        <div className="flex items-center gap-1.5 pt-1">
+          <button
+            type="button"
+            onClick={() => updateTransform({ scale: 0.8 })}
+            className="flex-1 rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/80 hover:bg-white/10 hover:text-white"
+          >
+            80%
+          </button>
+          <button
+            type="button"
+            onClick={() => updateTransform({ scale: 1.0 })}
+            className="flex-1 rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/80 hover:bg-white/10 hover:text-white"
+          >
+            100%
+          </button>
+          <button
+            type="button"
+            onClick={() => updateTransform({ scale: 1.25 })}
+            className="flex-1 rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/80 hover:bg-white/10 hover:text-white"
+          >
+            125%
+          </button>
+          <button
+            type="button"
+            onClick={resetCurrent}
+            className="flex items-center justify-center gap-1 rounded border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-semibold text-white/60 hover:bg-white/10 hover:text-white"
+            title="Reset Element"
+          >
+            <RotateCcw size={10} />
+            <span>Reset</span>
+          </button>
+        </div>
+      </div>
+
+      {/* ── Element Padding & Spacing ── */}
+      <div className="flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.025] p-2.5">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-tertiary)] flex items-center justify-between">
+          <span>Element Padding</span>
+          <span className="font-mono text-cyan-300 font-bold">
+            {currentTransform.padding || 0}px
+          </span>
+        </span>
+        <div className="flex items-center gap-2">
+          <input
+            type="range"
+            min={0}
+            max={24}
+            step={1}
+            value={currentTransform.padding || 0}
+            onChange={(e) => updateTransform({ padding: parseInt(e.target.value, 10) || 0 })}
+            className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/20 accent-cyan-400"
+          />
+        </div>
+        <div className="flex items-center gap-1.5 pt-0.5">
+          {[0, 2, 4, 8, 12, 16].map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => updateTransform({ padding: p })}
+              className={cn(
+                'flex-1 rounded border py-1 text-[10px] font-semibold transition-all',
+                (currentTransform.padding || 0) === p
+                  ? 'border-cyan-400 bg-cyan-400/20 text-cyan-200'
+                  : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10 hover:text-white'
+              )}
+            >
+              {p}px
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Interactive Drag On Screen Toggle ── */}
+      <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.025] p-2.5">
+        <div className="flex flex-col">
+          <span className="text-xs font-semibold text-white/90">Interactive Screen Drag</span>
+          <span className="text-[10px] text-[var(--text-tertiary)]">Click & drag elements directly in the card</span>
+        </div>
+        <Toggle
+          checked={widget.hudEditMode === true}
+          onChange={(v) => onUpdate({ hudEditMode: v, preset: 'custom' })}
+        />
+      </div>
+
+      <div className="flex items-center justify-between pt-1">
+        <button
+          type="button"
+          onClick={resetAll}
+          className="text-[11px] text-rose-400 hover:text-rose-300 transition-colors flex items-center gap-1"
+        >
+          <RotateCcw size={11} />
+          <span>Reset All Elements to Default</span>
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── 3. Widget Card HUD Layout (Size & Position) ──
+export function HudLayoutBox({
+  widget,
+  onUpdate,
+  minSize = { width: 120, height: 80 },
+  maxSize,
+}: {
+  widget: Widget
+  onUpdate: (patch: Partial<Widget>) => void
+  minSize?: { width: number; height: number }
+  maxSize?: { width?: number; height?: number }
+}) {
+  const [step, setStep] = useState<number>(5)
+
+  const viewportW = typeof window !== 'undefined' ? window.innerWidth : 1920
+  const viewportH = typeof window !== 'undefined' ? window.innerHeight : 1080
+
+  const minW = minSize.width
+  const maxW = maxSize?.width ?? viewportW
+  const minH = minSize.height
+  const maxH = maxSize?.height ?? viewportH
+
+  const nudge = (dx: number, dy: number) => {
+    const newX = Math.max(0, Math.min(viewportW - widget.width, widget.x + dx))
+    const newY = Math.max(0, Math.min(viewportH - widget.height, widget.y + dy))
+    onUpdate({ x: newX, y: newY })
+  }
+
+  const centerScreen = () => {
+    const newX = Math.max(0, Math.round((viewportW - widget.width) / 2))
+    const newY = Math.max(0, Math.round((viewportH - widget.height) / 2))
+    onUpdate({ x: newX, y: newY })
+  }
+
+  const snapTo = (pos: 'tl' | 'tc' | 'tr' | 'cl' | 'cc' | 'cr' | 'bl' | 'bc' | 'br') => {
+    const pad = 24
+    let x = widget.x
+    let y = widget.y
+
+    if (pos.startsWith('t')) y = pad
+    if (pos.startsWith('c')) y = Math.max(0, Math.round((viewportH - widget.height) / 2))
+    if (pos.startsWith('b')) y = Math.max(0, viewportH - widget.height - pad)
+
+    if (pos.endsWith('l')) x = pad
+    if (pos.endsWith('c')) x = Math.max(0, Math.round((viewportW - widget.width) / 2))
+    if (pos.endsWith('r')) x = Math.max(0, viewportW - widget.width - pad)
+
+    onUpdate({ x, y })
+  }
+
+  const scaleBy = (multiplier: number) => {
+    const newW = Math.max(minW, Math.min(maxW, Math.round(widget.width * multiplier)))
+    const newH = Math.max(minH, Math.min(maxH, Math.round(widget.height * multiplier)))
+    onUpdate({ width: newW, height: newH })
+  }
+
+  return (
+    <div className="flex w-[285px] flex-col gap-2.5 select-none text-[13px]">
+      {/* Precise Nudge D-Pad */}
+      <div className="flex flex-col items-center gap-2 rounded-lg border border-white/10 bg-white/[0.025] p-3">
+        <div className="flex w-full items-center justify-between">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-tertiary)] flex items-center gap-1.5">
+            <Move size={12} className="text-[var(--accent)]" />
+            Precise Nudge (D-Pad)
+          </span>
+          <div className="flex items-center gap-1 rounded bg-black/40 p-0.5 border border-white/10">
+            {[1, 5, 25].map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setStep(s)}
+                className={cn(
+                  'rounded px-1.5 py-0.5 text-[10px] font-mono font-bold transition-colors',
+                  step === s
+                    ? 'bg-[var(--accent)] text-[var(--on-accent)]'
+                    : 'text-white/60 hover:text-white'
+                )}
+              >
+                {s}px
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="relative my-1 flex h-[106px] w-[106px] items-center justify-center rounded-full border border-white/10 bg-black/50 shadow-inner">
+          <button
+            type="button"
+            onClick={() => nudge(0, -step)}
+            title={`Nudge Up ${step}px`}
+            className="absolute top-1 flex h-8 w-8 items-center justify-center rounded-md bg-white/10 text-white/90 shadow transition-all hover:bg-[var(--accent)] hover:text-[var(--on-accent)] active:scale-90"
+          >
+            <ChevronUp size={18} />
+          </button>
+          <button
+            type="button"
+            onClick={() => nudge(0, step)}
+            title={`Nudge Down ${step}px`}
+            className="absolute bottom-1 flex h-8 w-8 items-center justify-center rounded-md bg-white/10 text-white/90 shadow transition-all hover:bg-[var(--accent)] hover:text-[var(--on-accent)] active:scale-90"
+          >
+            <ChevronDown size={18} />
+          </button>
+          <button
+            type="button"
+            onClick={() => nudge(-step, 0)}
+            title={`Nudge Left ${step}px`}
+            className="absolute left-1 flex h-8 w-8 items-center justify-center rounded-md bg-white/10 text-white/90 shadow transition-all hover:bg-[var(--accent)] hover:text-[var(--on-accent)] active:scale-90"
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <button
+            type="button"
+            onClick={() => nudge(step, 0)}
+            title={`Nudge Right ${step}px`}
+            className="absolute right-1 flex h-8 w-8 items-center justify-center rounded-md bg-white/10 text-white/90 shadow transition-all hover:bg-[var(--accent)] hover:text-[var(--on-accent)] active:scale-90"
+          >
+            <ChevronRight size={18} />
+          </button>
+          <button
+            type="button"
+            onClick={centerScreen}
+            title="Center Widget on Screen"
+            className="flex h-7 w-7 items-center justify-center rounded-full bg-white/15 text-white/90 transition-all hover:bg-white/30 hover:scale-105 active:scale-95"
+          >
+            <Crosshair size={14} />
+          </button>
+        </div>
+
+        <div className="grid w-full grid-cols-2 gap-2 text-center text-[11px]">
+          <div className="flex items-center justify-between rounded-md border border-white/10 bg-black/30 px-2 py-1">
+            <span className="text-[var(--text-tertiary)] font-bold">X</span>
+            <input
+              type="number"
+              value={Math.round(widget.x)}
+              onChange={(e) => {
+                const val = parseInt(e.target.value, 10)
+                if (!isNaN(val)) onUpdate({ x: Math.max(0, Math.min(viewportW - widget.width, val)) })
+              }}
+              className="w-16 bg-transparent text-right font-mono text-white focus:outline-none"
+            />
+            <span className="text-[var(--text-tertiary)] text-[9px] ml-0.5">px</span>
+          </div>
+
+          <div className="flex items-center justify-between rounded-md border border-white/10 bg-black/30 px-2 py-1">
+            <span className="text-[var(--text-tertiary)] font-bold">Y</span>
+            <input
+              type="number"
+              value={Math.round(widget.y)}
+              onChange={(e) => {
+                const val = parseInt(e.target.value, 10)
+                if (!isNaN(val)) onUpdate({ y: Math.max(0, Math.min(viewportH - widget.height, val)) })
+              }}
+              className="w-16 bg-transparent text-right font-mono text-white focus:outline-none"
+            />
+            <span className="text-[var(--text-tertiary)] text-[9px] ml-0.5">px</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Size & Dimensions */}
+      <div className="flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.025] p-2.5">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-tertiary)] flex items-center justify-between">
+          <span>Widget Size</span>
+          <span className="font-mono text-white/80">{Math.round(widget.width)} × {Math.round(widget.height)}</span>
+        </span>
+
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between text-[11px] text-white/70">
+            <span>Width</span>
+            <span className="font-mono">{Math.round(widget.width)}px</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onUpdate({ width: Math.max(minW, widget.width - 10) })}
+              className="flex h-6 w-6 items-center justify-center rounded border border-white/15 bg-white/5 text-white/80 hover:bg-white/15 active:scale-95"
+            >
+              -
+            </button>
+            <input
+              type="range"
+              min={minW}
+              max={maxW}
+              step={2}
+              value={widget.width}
+              onChange={(e) => onUpdate({ width: parseInt(e.target.value, 10) })}
+              className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/20 accent-[var(--accent)]"
+            />
+            <button
+              type="button"
+              onClick={() => onUpdate({ width: Math.min(maxW, widget.width + 10) })}
+              className="flex h-6 w-6 items-center justify-center rounded border border-white/15 bg-white/5 text-white/80 hover:bg-white/15 active:scale-95"
+            >
+              +
+            </button>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1 pt-1">
+          <div className="flex items-center justify-between text-[11px] text-white/70">
+            <span>Height</span>
+            <span className="font-mono">{Math.round(widget.height)}px</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onUpdate({ height: Math.max(minH, widget.height - 10) })}
+              className="flex h-6 w-6 items-center justify-center rounded border border-white/15 bg-white/5 text-white/80 hover:bg-white/15 active:scale-95"
+            >
+              -
+            </button>
+            <input
+              type="range"
+              min={minH}
+              max={maxH}
+              step={2}
+              value={widget.height}
+              onChange={(e) => onUpdate({ height: parseInt(e.target.value, 10) })}
+              className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/20 accent-[var(--accent)]"
+            />
+            <button
+              type="button"
+              onClick={() => onUpdate({ height: Math.min(maxH, widget.height + 10) })}
+              className="flex h-6 w-6 items-center justify-center rounded border border-white/15 bg-white/5 text-white/80 hover:bg-white/15 active:scale-95"
+            >
+              +
+            </button>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1.5 pt-1">
+          <button
+            type="button"
+            onClick={() => scaleBy(0.9)}
+            className="flex-1 rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/80 hover:bg-white/10 hover:text-white"
+          >
+            -10% Scale
+          </button>
+          <button
+            type="button"
+            onClick={() => scaleBy(1.1)}
+            className="flex-1 rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/80 hover:bg-white/10 hover:text-white"
+          >
+            +10% Scale
+          </button>
+          <button
+            type="button"
+            onClick={() => onUpdate({ width: 380, height: 220 })}
+            className="flex items-center justify-center gap-1 rounded border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-semibold text-white/60 hover:bg-white/10 hover:text-white"
+            title="Reset to default 380x220"
+          >
+            <RotateCcw size={10} />
+            <span>Reset</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Snap to Screen Edge */}
+      <div className="flex flex-col gap-1.5 rounded-lg border border-white/10 bg-white/[0.025] p-2.5">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-tertiary)]">
+          Snap to Screen Edge
+        </span>
+        <div className="grid grid-cols-3 gap-1">
+          <button
+            type="button"
+            onClick={() => snapTo('tl')}
+            className="rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/70 hover:bg-white/15 hover:text-white"
+          >
+            Top Left
+          </button>
+          <button
+            type="button"
+            onClick={() => snapTo('tc')}
+            className="rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/70 hover:bg-white/15 hover:text-white"
+          >
+            Top Center
+          </button>
+          <button
+            type="button"
+            onClick={() => snapTo('tr')}
+            className="rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/70 hover:bg-white/15 hover:text-white"
+          >
+            Top Right
+          </button>
+          <button
+            type="button"
+            onClick={() => snapTo('cl')}
+            className="rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/70 hover:bg-white/15 hover:text-white"
+          >
+            Mid Left
+          </button>
+          <button
+            type="button"
+            onClick={() => snapTo('cc')}
+            className="rounded border border-[var(--accent)]/40 bg-[var(--accent)]/10 py-1 text-[10px] font-bold text-[var(--accent)] hover:bg-[var(--accent)]/20"
+          >
+            Center
+          </button>
+          <button
+            type="button"
+            onClick={() => snapTo('cr')}
+            className="rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/70 hover:bg-white/15 hover:text-white"
+          >
+            Mid Right
+          </button>
+          <button
+            type="button"
+            onClick={() => snapTo('bl')}
+            className="rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/70 hover:bg-white/15 hover:text-white"
+          >
+            Bottom Left
+          </button>
+          <button
+            type="button"
+            onClick={() => snapTo('bc')}
+            className="rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/70 hover:bg-white/15 hover:text-white"
+          >
+            Bottom Center
+          </button>
+          <button
+            type="button"
+            onClick={() => snapTo('br')}
+            className="rounded border border-white/10 bg-white/5 py-1 text-[10px] font-semibold text-white/70 hover:bg-white/15 hover:text-white"
+          >
+            Bottom Right
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}

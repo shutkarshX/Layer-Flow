@@ -128,6 +128,8 @@ export function Select<T extends string>({
   className,
 }: SelectProps<T>) {
   const [open, setOpen] = useState(false)
+  const [openUp, setOpenUp] = useState(false)
+  const [maxMenuHeight, setMaxMenuHeight] = useState(200)
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -145,7 +147,19 @@ export function Select<T extends string>({
     <div ref={ref} className={cn('relative', className)}>
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          if (!open && ref.current) {
+            const rect = ref.current.getBoundingClientRect()
+            const spaceDown = window.innerHeight - rect.bottom - 12
+            const spaceUp = rect.top - 12
+            // Only open upward if space below is too small AND space above is larger
+            const shouldOpenUp = spaceDown < 190 && spaceUp > spaceDown
+            setOpenUp(shouldOpenUp)
+            const availableSpace = shouldOpenUp ? spaceUp : spaceDown
+            setMaxMenuHeight(Math.max(120, Math.min(220, availableSpace - 8)))
+          }
+          setOpen((o) => !o)
+        }}
         className="flex w-full items-center justify-between gap-2 rounded-[8px] border border-[var(--border)] bg-[var(--fill-1)] px-2.5 py-1.5 text-[13px] font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--border-strong)]"
       >
         <span className="truncate">{current?.label ?? value}</span>
@@ -158,7 +172,13 @@ export function Select<T extends string>({
         />
       </button>
       {open && (
-        <div className="glass absolute left-0 right-0 z-[60] mt-1 max-h-[240px] overflow-y-auto rounded-[10px] border border-[var(--border)] p-1">
+        <div
+          style={{ maxHeight: `${maxMenuHeight}px` }}
+          className={cn(
+            'absolute left-0 right-0 z-[100] overflow-y-auto rounded-[10px] border border-white/20 bg-[#1c1c20] p-1 shadow-2xl overscroll-contain [scrollbar-width:thin]',
+            openUp ? 'bottom-full mb-1.5' : 'top-full mt-1.5',
+          )}
+        >
           {options.map((o) => {
             const active = o.value === value
             return (

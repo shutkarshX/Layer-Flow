@@ -412,18 +412,20 @@ mod imp {
                         }
                     }
 
-                    let mut peak = 0.0f32;
-                    let ok = if let Some(m) = &meter_opt {
-                        unsafe { m.GetPeakValue(&mut peak).is_ok() }
+                    let peak = if let Some(m) = &meter_opt {
+                        unsafe {
+                            match m.GetPeakValue() {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    meter_opt = None;
+                                    std::thread::sleep(Duration::from_millis(200));
+                                    continue;
+                                }
+                            }
+                        }
                     } else {
-                        false
+                        0.0
                     };
-
-                    if !ok {
-                        meter_opt = None;
-                        std::thread::sleep(Duration::from_millis(200));
-                        continue;
-                    }
 
                     AUDIO_PEAK.store(peak.to_bits(), Ordering::Relaxed);
 

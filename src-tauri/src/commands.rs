@@ -825,6 +825,8 @@ enum Cmd {
     Next,
     Prev,
     Toggle,
+    Play,
+    Pause,
     Seek(f64),
     Loop(bool),
 }
@@ -1146,6 +1148,16 @@ fn apply(
                 let _ = s.TrySkipPreviousAsync();
                 send_extended_media_key(0xB1, 0x10);
             }
+            Cmd::Play => {
+                if !is_currently_playing {
+                    let _ = s.TryPlayAsync();
+                }
+            }
+            Cmd::Pause => {
+                if is_currently_playing {
+                    let _ = s.TryPauseAsync();
+                }
+            }
             Cmd::Toggle => {
                 let mut toggled = false;
                 let op = if is_currently_playing {
@@ -1183,6 +1195,8 @@ fn apply(
         // Fallback if no active SMTC session exists at all
         match cmd {
             Cmd::Toggle => send_extended_media_key(0xB3, 0x22),
+            Cmd::Play => send_extended_media_key(0xB3, 0x22),
+            Cmd::Pause => send_extended_media_key(0xB3, 0x22),
             Cmd::Next => send_extended_media_key(0xB0, 0x19),
             Cmd::Prev => send_extended_media_key(0xB1, 0x10),
             _ => {}
@@ -1211,6 +1225,8 @@ pub fn media_control(action: String) {
         let cmd = match action.as_str() {
             "next" => Cmd::Next,
             "prev" => Cmd::Prev,
+            "play" => Cmd::Play,
+            "pause" => Cmd::Pause,
             _ => Cmd::Toggle,
         };
         let _ = smtc().tx.send(cmd);

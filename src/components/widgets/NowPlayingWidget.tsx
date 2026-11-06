@@ -3025,6 +3025,8 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
   const [livePos, setLivePos] = useState<number>(0)
   const [isPlaying, setIsPlaying] = useState<boolean>(true)
   const [isLooping, setIsLooping] = useState<boolean>(false)
+  const lastLoopToggleTimeRef = useRef<number>(0)
+  const lastLoopSeekTimeRef = useRef<number>(0)
   const [discoveredThumb, setDiscoveredThumb] = useState<string | null>(null)
   const lastSeekTimeRef = useRef<number>(0)
   const liveAudioPeakRef = useRef<number>(0)
@@ -3033,6 +3035,19 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
   const [isKaraokeOpen, setIsKaraokeOpen] = useState<boolean>(false)
   const [wallpaperAccent, setWallpaperAccent] = useState<string | null>(null)
   const lyricsContainerRef = useRef<HTMLDivElement>(null)
+
+  const handleSeek = (time: number) => {
+    lastSeekTimeRef.current = performance.now()
+    lastSyncRef.current = {
+      pos: time,
+      time: performance.now(),
+      playing: session?.playing ?? isPlaying,
+    }
+    setLivePos(time)
+    if (isTauri()) {
+      mediaSeek(time).catch(() => {})
+    }
+  }
 
 
   useEffect(() => {
@@ -3204,6 +3219,18 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
               playing: np.playing,
             }
           }
+
+          // Safety check: if loop is active and polled OS position reached near end of duration:
+          const npDur = np.duration || 0
+          const npPos = np.position || 0
+          const loopThreshold = npDur > 6 ? npDur - 2.0 : Math.max(0.5, npDur - 0.8)
+          if (isLooping && npDur > 2 && npPos >= loopThreshold) {
+            const now = performance.now()
+            if (now - lastLoopSeekTimeRef.current > 2500) {
+              lastLoopSeekTimeRef.current = now
+              handleSeek(0)
+            }
+          }
         }
       } catch {
         // Fallback
@@ -3234,15 +3261,26 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
           const dur = session?.duration || 0
           const current = dur > 0 ? Math.min(dur, pos + elapsed) : pos + elapsed
           setLivePos(current)
-          if (isLooping && dur > 2 && current >= dur - 0.85) {
-            handleSeek(0)
+          // When loop is active and audio approaches within 2.0s of the end (before YouTube's queue switches track):
+          // seamlessly replay from the beginning!
+          const loopThreshold = dur > 6 ? dur - 2.0 : Math.max(0.5, dur - 0.8)
+          if (isLooping && dur > 2 && current >= loopThreshold) {
+            const now = performance.now()
+            if (now - lastLoopSeekTimeRef.current > 2500) {
+              lastLoopSeekTimeRef.current = now
+              handleSeek(0)
+            }
           }
         }
       } else {
         if (isPlaying) {
           setLivePos((p) => {
             const dur = currentMock.duration
-            if (p >= dur) return isLooping ? 0 : 0
+            if (p >= dur) {
+              if (isLooping) return 0
+              setMockIndex((prev) => (prev + 1) % MOCK_PLAYLIST.length)
+              return 0
+            }
             return +(p + 0.1).toFixed(2)
           })
         }
@@ -3487,6 +3525,10 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
   const prevTrack = (e: React.MouseEvent) => {
     e.stopPropagation()
     ;(e.currentTarget as HTMLElement)?.blur()
+    if (isLooping) {
+      handleSeek(0)
+      return
+    }
     const canPrev = session?.canSkipPrev ?? true
     if (isTauri()) {
       mediaControl('prev').catch(() => {})
@@ -3505,6 +3547,10 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
   const nextTrack = (e: React.MouseEvent) => {
     e.stopPropagation()
     ;(e.currentTarget as HTMLElement)?.blur()
+    if (isLooping) {
+      handleSeek(0)
+      return
+    }
     const canNext = session?.canSkipNext ?? true
     const dur = session?.duration || 0
     if (isTauri()) {
@@ -3518,19 +3564,6 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
       setLivePos(0)
     } else {
       setMockIndex((prev) => (prev + 1) % MOCK_PLAYLIST.length)
-    }
-  }
-
-  const handleSeek = (time: number) => {
-    lastSeekTimeRef.current = performance.now()
-    lastSyncRef.current = {
-      pos: time,
-      time: performance.now(),
-      playing: session?.playing ?? isPlaying,
-    }
-    setLivePos(time)
-    if (isTauri()) {
-      mediaSeek(time).catch(() => {})
     }
   }
 
@@ -3570,14 +3603,16 @@ export function NowPlayingRenderer({ widget }: { widget: NowPlayingWidgetType })
             type="button"
             onClick={(e) => {
               e.stopPropagation()
+              ;(e.currentTarget as HTMLElement)?.blur()
               const nextVal = !isLooping
               setIsLooping(nextVal)
+              lastLoopToggleTimeRef.current = performance.now()
               if (isTauri()) {
                 mediaRepeat(nextVal).catch(() => {})
               }
             }}
             title="Toggle Loop"
-            className={`flex h-8 w-8 items-center justify-center transition-all ${
+            className={`flex h-8 w-8 items-center justify-center transition-all outline-none focus:outline-none focus:ring-0 focus-visible:outline-none select-none ${
               isLooping
                 ? 'text-[var(--accent)] drop-shadow-[0_0_6px_var(--accent)] scale-110'
                 : 'text-[var(--text-tertiary)] hover:text-white'

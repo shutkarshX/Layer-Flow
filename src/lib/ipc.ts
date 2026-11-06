@@ -90,7 +90,7 @@ export interface NowPlaying {
 
 export const getNowPlaying = () => invoke<NowPlaying>('get_now_playing')
 
-export const mediaControl = (action: 'playpause' | 'next' | 'prev') =>
+export const mediaControl = (action: 'playpause' | 'next' | 'prev' | 'play' | 'pause') =>
   invoke<void>('media_control', { action })
 
 export const mediaSeek = (position: number) =>
